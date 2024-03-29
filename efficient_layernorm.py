@@ -38,14 +38,7 @@ from gact.dct_processor import DCTProcessor
 from gact.jpeg_processor import JPEGProcessor
 from gact.memory_efficient_function import per_block_quantization, per_block_dequantization, dct_compression, jpeg_compression, naive_adjustment
 
-try:
-    # This is https://github.com/NVIDIA/apex, NOT the apex on PyPi, so it
-    # should not be added to extras_require in setup.py.
-    import apex
-    HAS_APEX = True
-except ModuleNotFoundError:
-    HAS_APEX = False
-
+HAS_APEX = False
 
 @triton.jit
 def _layer_norm_fwd_fused(

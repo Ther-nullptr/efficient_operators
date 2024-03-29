@@ -1,6 +1,6 @@
 import torch
 
-class MySoftmaxFunc(torch.autograd.Function):
+class EfficientMemorySoftmaxFunc(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
         y = torch.softmax(x, dim=-1)
@@ -13,9 +13,9 @@ class MySoftmaxFunc(torch.autograd.Function):
         return (grad_output - (grad_output * y).sum(dim=-1, keepdims=True)) * y
     
 
-class MySoftmax(torch.nn.Module):
+class EfficientMemorySoftmax(torch.nn.Module):
     def __init__(self):
-        super(MySoftmax, self).__init__()
+        super(EfficientMemorySoftmax, self).__init__()
     
     def forward(self, x):
-        return MySoftmaxFunc.apply(x)
+        return EfficientMemorySoftmaxFunc.apply(x)

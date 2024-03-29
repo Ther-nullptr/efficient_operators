@@ -1,6 +1,6 @@
 import math
 import torch
-import torch.nn.functional as F
+import bitsandbytes.functional as F
 from gact.dct_processor import DCTProcessor
 from gact.jpeg_processor import JPEGProcessor
 from gact.memory_efficient_function import per_block_quantization, per_block_dequantization, dct_compression, jpeg_compression, naive_adjustment
@@ -13,7 +13,12 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
     ctx.compress_type = compress_type
     ctx.quantization_shape = quantization_shape
 
-    if compress_type != 'NONE':
+    if compress_type == 'NF4':
+      # quantize the cached activation
+      x1, quant_state_1 = F.quantize_nf4(x1)
+      x2, quant_state_2 = F.quantize_nf4(x2)
+      ctx.quant_state = quant_state_1, quant_state_2
+    elif compress_type != 'NONE':
       # shape preparation for DCT
       input_shape = [x1.shape, x2.shape]
       ctx.input_shape = input_shape
@@ -45,7 +50,10 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
     grad_input1, grad_input2 = None, None
 
     if ctx.needs_inputs_grad[0] or ctx.needs_inputs_grad[1]:
-      if ctx.compress_type != 'NONE':
+      if ctx.compress_type == 'NF4':
+        x1 = F.dequantize_nf4(x1, ctx.quant_state[0])
+        x2 = F.dequantize_nf4(x2, ctx.quant_state[1])
+      elif ctx.compress_type != 'NONE':
         quant_state1, quant_state2 = ctx.quant_state
         input_shape1, input_shape2 = ctx.input_shape
         x1 = per_block_dequantization(x1, input_shape1, quant_state1, quantization_shape)

@@ -13,7 +13,11 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
     ctx.compress_type = compress_type
     ctx.quantization_shape = quantization_shape
 
-    if compress_type != 'NONE':
+    if compress_type == 'NF4':
+        # quantize the cached activation
+        x, quant_state = F.quantize_nf4(x)
+        ctx.quant_state = quant_state
+    elif compress_type != 'NONE':
       input_shape = x.shape
       ctx.input_shape = input_shape
 
@@ -42,7 +46,9 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
     grad_input = None
 
     if ctx.needs_inputs_grad:
-      if ctx.compress_type != 'NONE':
+      if ctx.compress_type == 'NF4':
+        x = F.dequantize_nf4(x, ctx.quant_state)
+      elif ctx.compress_type != 'NONE':
         quant_state = ctx.quant_state
         input_shape = ctx.input_shape
         x = per_block_dequantization(x, input_shape, quant_state, quantization_shape)
