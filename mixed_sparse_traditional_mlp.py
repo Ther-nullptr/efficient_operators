@@ -116,11 +116,8 @@ class MixedSparseTraditionalMLPFunc(torch.autograd.Function):
 
 
 class MixedSparseTraditionalMLP(torch.nn.Module):
-    def __init__(self, activation_forward='relu', sparsity_ratio=0.5, maintain_channels=10, quantization=False, layer_id=0):
+    def __init__(self, activation_forward='relu', quantization=False, layer_id=0):
         super(MixedSparseTraditionalMLP, self).__init__()
-        self.sparsity_ratio = sparsity_ratio
-        self.maintain_channels = maintain_channels
-
         # activation function method. Now support: ReLU, SiLU, GELU. Notice that default activation_backward is relu
         self.activation_forward = activation_forward
         self.quantization = quantization
@@ -130,7 +127,8 @@ class MixedSparseTraditionalMLP(torch.nn.Module):
     def forward(
         self, input: torch.Tensor,
         up_proj_base: bnb.nn.modules.Linear4bit, up_proj_lora_a: torch.nn.Linear, up_proj_lora_b: torch.nn.Linear,
-        down_proj_base: bnb.nn.modules.Linear4bit, down_proj_lora_a: torch.nn.Linear, down_proj_lora_b: torch.nn.Linear
+        down_proj_base: bnb.nn.modules.Linear4bit, down_proj_lora_a: torch.nn.Linear, down_proj_lora_b: torch.nn.Linear,
+        sparsity_ratio: float, maintain_channels: float
     ):
         #! Notice we use equation y = xW + b; instead of default y = xW^T + b
         self.iteration += 1
@@ -149,8 +147,8 @@ class MixedSparseTraditionalMLP(torch.nn.Module):
             down_proj_lora_b.default.weight.T,
             ############################
             self.activation_forward,
-            self.sparsity_ratio,
-            self.maintain_channels,
+            sparsity_ratio,
+            maintain_channels,
             self.quantization,
             self.iteration,
             self.layer_id

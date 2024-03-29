@@ -110,17 +110,15 @@ class MixedSparseAttentionFunc(torch.autograd.Function):
 
 
 class MixedSparseAttention(torch.nn.Module):
-    def __init__(self, hidden_dim: int, num_heads: int, sparsity_ratio: float, maintain_heads: int, quantization: bool = False, layer_id=0):
+    def __init__(self, hidden_dim: int, num_heads: int, quantization: bool = False, layer_id: int = 0):
         super(MixedSparseAttention, self).__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.sparsity_ratio = sparsity_ratio
-        self.maintain_heads = maintain_heads
         self.quantization = quantization
         self.iteration = 0
         self.layer_id = layer_id
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attention_mask: torch.Tensor):
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attention_mask: torch.Tensor, sparsity_ratio: float, maintain_heads: int = 1):
         self.iteration += 1
-        return MixedSparseAttentionFunc.apply(q, k, v, attention_mask, self.sparsity_ratio, self.maintain_heads, self.quantization, self.iteration, self.layer_id)
+        return MixedSparseAttentionFunc.apply(q, k, v, attention_mask, sparsity_ratio, maintain_heads, self.quantization, self.iteration, self.layer_id)
     

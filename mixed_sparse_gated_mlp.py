@@ -10,7 +10,7 @@ def d_gelu(x):
 
 def d_silu(x):
     exp_val = torch.exp(x)
-    return exp_val * (x + exp_val + 1) / (1 + exp_val) ** 2
+    return exp_val * (x + exp_val + 1) / (exp_val + 1) ** 2
 
 class MixedSparseGatedMLPFunc(torch.autograd.Function):
     @staticmethod
@@ -19,7 +19,7 @@ class MixedSparseGatedMLPFunc(torch.autograd.Function):
         w_gate: torch.Tensor, b_gate: torch.Tensor, w_gate_state: typing.Tuple, w_gate_lora_a: torch.Tensor, w_gate_lora_b: torch.Tensor, 
         w_up: torch.Tensor, b_up: torch.Tensor, w_up_state: typing.Tuple, w_up_lora_a: torch.Tensor, w_up_lora_b: torch.Tensor, 
         w_down: torch.Tensor, b_down: torch.Tensor, w_down_state: typing.Tuple, w_down_lora_a: torch.Tensor, w_down_lora_b: torch.Tensor, 
-        activation_forward: str, sparsity_ratio: float, maintain_channels_zeros: int, quantization: bool
+        activation_forward: str, sparsity_ratio: float, maintain_channels_zeros: int, quantization: bool, small_value_approx: bool
     ):  
         # forward process: gate_proj
         w_gate_dequant = F.dequantize_4bit(w_gate, w_gate_state).to(x1.dtype).t()
@@ -58,10 +58,10 @@ class MixedSparseGatedMLPFunc(torch.autograd.Function):
         y3 = y3_main + y3_lora
 
         # save: x1, y1_lora_a, y1(for soft activations), mask(for hard activations), x2, y2_lora_a
+        # TODO: add small value approx functions for SiLU and GeLU
         mask = y1 > 0
         if activation_forward != 'relu':
             xL_main = torch.relu(xL)
-            xL_main_with_zero = xL_main * y1_main_mask
 
         # the pruning of x3 etc. is not urgent, we can implement it in other place
         zero_count_per_channel = (x3 == 0).sum(dim=-2) # [bs, seq_len, hidden_dim] -> [bs, hidden_dim]
@@ -84,11 +84,16 @@ class MixedSparseGatedMLPFunc(torch.autograd.Function):
             batch_idx = i
             col_indices = topk_indices[i]
             x3_save[i] = x3[batch_idx, :, col_indices]
-            if activation_forward != 'relu':
-                xL_save[i] = xL_main_with_zero[batch_idx, :, col_indices]
-            else:
+
+            if small_value_approx:
                 xL_save[i] = y1_main_with_zero[batch_idx, :, col_indices]
-            xR_save[i] = y2_main[batch_idx, :, col_indices]
+            else:
+                xL_save[i] = xL[batch_idx, :, col_indices]
+
+            if small_value_approx:
+                xR_save[i] = y2_main[batch_idx, :, col_indices]
+            else:
+                xR_save[i] = xR[batch_idx, :, col_indices]
 
         if quantization:
             x3_save, x3_quant_state = F.quantize_nf4(x3_save)
@@ -102,6 +107,7 @@ class MixedSparseGatedMLPFunc(torch.autograd.Function):
         ctx.topk_indices = topk_indices
         ctx.x3_shape = x3.shape
         ctx.x3_device = x3.device
+        ctx.small_value_approx = small_value_approx
 
         return y3
     
@@ -127,8 +133,9 @@ class MixedSparseGatedMLPFunc(torch.autograd.Function):
             xL[i, :, topk_indices[i]] = xL_save[i]
             xR[i, :, topk_indices[i]] = xR_save[i]
 
-        xR += (y2_lora_a @ w_up_lora_b) * mask
-        xL += (y1_lora_a @ w_gate_lora_b) * y1_main_mask
+        if ctx.small_value_approx:
+            xR += (y2_lora_a @ w_up_lora_b) * mask
+            xL += (y1_lora_a @ w_gate_lora_b) * y1_main_mask
 
         # down proj part
         # d L / d w_down_lora_a = x3.T @ d L / d y3 @ w_down_lora_b.T
@@ -172,22 +179,21 @@ class MixedSparseGatedMLPFunc(torch.autograd.Function):
         # print(f'norm of grad_y1 @ w_gate_dequant.T: {torch.norm(grad_y1 @ w_gate_dequant.T)}')
         # print(f'norm of grad_y1 @ w_gate_lora_b.T @ w_gate_lora_a.T: {torch.norm(grad_y1 @ w_gate_lora_b.T @ w_gate_lora_a.T)}')
 
-        return grad_x1, None, None, None, grad_w_gate_lora_a, grad_w_gate_lora_b, None, None, None, grad_w_up_lora_a, grad_w_up_lora_b, None, None, None, grad_w_down_lora_a, grad_w_down_lora_b, None, None, None, None
+        return grad_x1, None, None, None, grad_w_gate_lora_a, grad_w_gate_lora_b, None, None, None, grad_w_up_lora_a, grad_w_up_lora_b, None, None, None, grad_w_down_lora_a, grad_w_down_lora_b, None, None, None, None, None
 
 
 class MixedSparseGatedMLP(torch.nn.Module):
-    def __init__(self, activation_forward='relu', sparsity_ratio=0.5, maintain_channels_zeros=0.9, bias=False, quantization=False):
+    def __init__(self, activation_forward='relu', quantization=False):
         super(MixedSparseGatedMLP, self).__init__()
         self.activation_forward = activation_forward
-        self.maintain_channels_zeros = maintain_channels_zeros
-        self.sparsity_ratio = sparsity_ratio
         self.quantization = quantization
 
     def forward(
         self, input: torch.Tensor, 
         gate_proj_base: bnb.nn.modules.Linear4bit, gate_proj_lora_a: torch.nn.Linear, gate_proj_lora_b: torch.nn.Linear,
         up_proj_base: bnb.nn.modules.Linear4bit, up_proj_lora_a: torch.nn.Linear, up_proj_lora_b: torch.nn.Linear,
-        down_proj_base: bnb.nn.modules.Linear4bit, down_proj_lora_a: torch.nn.Linear, down_proj_lora_b: torch.nn.Linear
+        down_proj_base: bnb.nn.modules.Linear4bit, down_proj_lora_a: torch.nn.Linear, down_proj_lora_b: torch.nn.Linear,
+        sparsity_ratio: float, maintain_channels_zeros_ratio: float, small_value_approx: bool
     ):
         return MixedSparseGatedMLPFunc.apply(
             input,
@@ -210,7 +216,8 @@ class MixedSparseGatedMLP(torch.nn.Module):
             down_proj_lora_b.default.weight.T,
             ############################
             self.activation_forward,
-            self.sparsity_ratio,
-            self.maintain_channels_zeros,
-            self.quantization
+            sparsity_ratio,
+            maintain_channels_zeros_ratio,
+            self.quantization,
+            small_value_approx
         )
