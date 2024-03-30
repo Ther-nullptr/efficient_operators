@@ -118,7 +118,7 @@ class MixedSparseAttention(torch.nn.Module):
         self.iteration = 0
         self.layer_id = layer_id
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attention_mask: torch.Tensor, sparsity_ratio: float, maintain_heads: int = 1):
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attention_mask: torch.Tensor, sparsity_ratio: float, maintain_heads: int):
         self.iteration += 1
         return MixedSparseAttentionFunc.apply(q, k, v, attention_mask, sparsity_ratio, maintain_heads, self.quantization, self.iteration, self.layer_id)
     
