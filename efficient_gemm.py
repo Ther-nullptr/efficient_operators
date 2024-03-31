@@ -1,6 +1,6 @@
 import math
 import torch
-import torch.nn.functional as F
+import bitsandbytes.functional as F
 from gact.dct_processor import DCTProcessor
 from gact.jpeg_processor import JPEGProcessor
 from gact.memory_efficient_function import per_block_quantization, per_block_dequantization, dct_compression, jpeg_compression, naive_adjustment

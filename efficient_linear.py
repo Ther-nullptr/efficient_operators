@@ -3,7 +3,7 @@ import bitsandbytes.functional as F
 from gact.dct_processor import DCTProcessor
 from gact.jpeg_processor import JPEGProcessor
 
-from gact.memory_efficient_function import per_block_quantization, per_block_dequantization, dct_compression, dct_compression_transpose ,jpeg_compression, naive_adjustment
+from gact.memory_efficient_function import per_block_quantization, per_block_dequantization, dct_compression, jpeg_compression, naive_adjustment
 
 class EfficientMemoryLinearFunc(torch.autograd.Function):
     # only suitable for batched matmul: (BxMxK) @ (KxR) -> (BxKxR) or (BxKxR) @ (RxN) -> (BxKxN)

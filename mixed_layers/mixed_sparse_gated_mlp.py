@@ -66,7 +66,7 @@ class MixedSparseGatedMLPFunc(torch.autograd.Function):
         # the pruning of x3 etc. is not urgent, we can implement it in other place
         zero_count_per_channel = (x3 == 0).sum(dim=-2) # [bs, seq_len, hidden_dim] -> [bs, hidden_dim]
         seq_len = x3.size(-2)
-        # choose according to all the zero layers. i.e. I will prune all the channels that zero num is larger than 250 (if the total length is 320), instead of the fixed ratio
+        # choose according to all the zero layers. i.e. I will prune all the channels that zero num is larger than 320 * 0.8 (if the total length is 320), instead of the fixed ratio
         actual_maintain_channel = max(int(sparsity_ratio * x3.size(-1)), (zero_count_per_channel < int(seq_len * maintain_channels_zeros)).sum(dim=-1).float().mean().int().item())
         # print(f'benchmark 1: {int(sparsity_ratio * x3.size(-1))}')
         # print(f'benchmark 2: {(zero_count_per_channel < int(seq_len * maintain_channels_zeros)).sum(dim=-1).float().mean()}')
