@@ -16,7 +16,7 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
 
     if compress_type == 'NF4':
         # quantize the cached activation
-        x, quant_state = F.quantize_nf4(x)
+        x, quant_state = BF.quantize_nf4(x)
         ctx.quant_state = quant_state
     elif compress_type != 'NONE':
       input_shape = x.shape
@@ -45,7 +45,7 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
 
     if ctx.needs_inputs_grad:
       if ctx.compress_type == 'NF4':
-        x = F.dequantize_nf4(x, ctx.quant_state)
+        x = BF.dequantize_nf4(x, ctx.quant_state)
       elif ctx.compress_type != 'NONE':
         quant_state = ctx.quant_state
         input_shape = ctx.input_shape

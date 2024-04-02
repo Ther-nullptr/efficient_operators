@@ -31,8 +31,13 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
             input_shape = x.shape
             ctx.input_shape = input_shape
             # quantize the cached activation
-            x, quant_state = per_block_quantization(x, input_shape)
+            x, quant_state = per_block_quantization(x, input_shape, 64)
             ctx.quant_state = quant_state
+
+            if compress_type == 'PRUNE':
+                kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * 0.1)).values
+                x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
+                x = naive_adjustment(x, input_shape)
 
             # compress the cached activation
             if compress_type == 'JPEG':

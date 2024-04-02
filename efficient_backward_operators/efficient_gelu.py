@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn.functional as F
+import bitsandbytes.functional as BF
 from gact.dct_processor import DCTProcessor
 from gact.jpeg_processor import JPEGProcessor
 from gact.memory_efficient_function import per_block_quantization, per_block_dequantization, dct_compression, jpeg_compression, naive_adjustment
@@ -15,23 +16,27 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
 
     if compress_type == 'NF4':
         # quantize the cached activation
-        x, quant_state = F.quantize_nf4(x)
+        x, quant_state = BF.quantize_nf4(x)
         ctx.quant_state = quant_state
     elif compress_type != 'NONE':
-      input_shape = x.shape
-      ctx.input_shape = input_shape
+        input_shape = x.shape
+        ctx.input_shape = input_shape
 
-      x, quant_state = per_block_quantization(x, input_shape, quantization_shape)
-      ctx.quant_state = quant_state
+        x, quant_state = per_block_quantization(x, input_shape, quantization_shape)
+        ctx.quant_state = quant_state
 
-      if compress_type == 'JPEG':
-          x = jpeg_compression(x, input_shape, jpeg_processor, quantization_shape)
+        if compress_type == 'PRUNE':
+            kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * 0.1)).values
+            x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
 
-      elif compress_type == 'DCT':
-          x = dct_compression(x, input_shape, dct_processor, quantization_shape)
+        if compress_type == 'JPEG':
+            x = jpeg_compression(x, input_shape, jpeg_processor, quantization_shape)
 
-      elif compress_type == 'NAIVE':
-          x = naive_adjustment(x, input_shape, quantization_shape)
+        elif compress_type == 'DCT':
+            x = dct_compression(x, input_shape, dct_processor, quantization_shape)
+
+        elif compress_type == 'NAIVE':
+            x = naive_adjustment(x, input_shape, quantization_shape)
 
     ctx.save_for_backward(x)
     return result
@@ -47,7 +52,7 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
 
     if ctx.needs_inputs_grad:
       if ctx.compress_type == 'NF4':
-        x = F.dequantize_nf4(x, ctx.quant_state)
+        x = BF.dequantize_nf4(x, ctx.quant_state)
       elif ctx.compress_type != 'NONE':
         quant_state = ctx.quant_state
         input_shape = ctx.input_shape

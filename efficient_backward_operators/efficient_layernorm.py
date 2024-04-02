@@ -260,6 +260,11 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
             x, quant_state = per_block_quantization(x, input_shape, quantization_shape)
             ctx.quant_state = quant_state
 
+            if compress_type == 'PRUNE':
+                kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * 0.1)).values
+                x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
+                x = naive_adjustment(x, input_shape, quantization_shape)
+
             if compress_type == 'JPEG':
                 x = jpeg_compression(x, input_shape, jpeg_processor, quantization_shape)
 

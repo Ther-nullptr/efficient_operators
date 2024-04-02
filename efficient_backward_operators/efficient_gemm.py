@@ -23,14 +23,23 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
       input_shape = [x1.shape, x2.shape]
       ctx.input_shape = input_shape
       # quantize the cached activation
-      x1, quant_state1 = per_block_quantization(x1.contiguous(), input_shape[0])
-      x2, quant_state2 = per_block_quantization(x2.contiguous(), input_shape[1])
+      x1, quant_state1 = per_block_quantization(x1.contiguous(), input_shape[0],  quantization_shape)
+      x2, quant_state2 = per_block_quantization(x2.contiguous(), input_shape[1],  quantization_shape)
       ctx.quant_state = [quant_state1, quant_state2]
+
+      if compress_type == 'PRUNE':
+        kth_val = torch.kthvalue(x1.abs().flatten(), int(x1.numel() * 0.1)).values
+        x1 = torch.where(x1.abs() < kth_val, torch.zeros_like(x1), x1)
+        x1 = naive_adjustment(x1, input_shape[0])
+
+        kth_val = torch.kthvalue(x2.abs().flatten(), int(x2.numel() * 0.1)).values
+        x2 = torch.where(x2.abs() < kth_val, torch.zeros_like(x2), x2)
+        x2 = naive_adjustment(x2, input_shape[1])
 
       # compress the cached activation
       if compress_type == 'JPEG':
         if attn_first:
-          x1[x1 < -100] = -128
+          # x1[x1 < -100] = -128
           x1 = naive_adjustment(x1, input_shape[0])
         else:
           x1 = jpeg_compression(x1, input_shape[0], jpeg_processor)
@@ -38,15 +47,15 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
 
       elif compress_type == 'DCT':
         if attn_first:
-          x1[x1 < -100] = -128
+          # x1[x1 < -100] = -128
           x1 = naive_adjustment(x1, input_shape[0])
         else:
           x1 = dct_compression(x1, input_shape[0], dct_processor)
         x2 = dct_compression(x2, input_shape[1], dct_processor)
 
       elif compress_type == 'NAIVE':
-        if attn_first:
-          x1[x1 < -100] = -128
+        # if attn_first:
+        #   x1[x1 < -100] = -128
         x1 = naive_adjustment(x1, input_shape[0])
         x2 = naive_adjustment(x2, input_shape[1])
 
