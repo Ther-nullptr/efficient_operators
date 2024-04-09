@@ -21,8 +21,9 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
     elif compress_type != 'NONE':
       input_shape = x.shape
       ctx.input_shape = input_shape
+      bit = 4 if compress_type == 'INT4' else 8
 
-      x, quant_state = per_block_quantization(x, input_shape, quantization_shape)
+      x, quant_state = per_block_quantization(x, input_shape, quantization_shape, bit=bit)
       ctx.quant_state = quant_state
 
       if compress_type == 'JPEG':
@@ -31,7 +32,7 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
       elif compress_type == 'DCT':
           x = dct_compression(x, input_shape, dct_processor, quantization_shape)
 
-      elif compress_type == 'NAIVE':
+      elif compress_type == 'NAIVE' or compress_type == 'INT4':
           x = naive_adjustment(x, input_shape, quantization_shape)
 
     ctx.save_for_backward(x)

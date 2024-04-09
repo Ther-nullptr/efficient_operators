@@ -23,8 +23,9 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
       input_shape = [x1.shape, x2.shape]
       ctx.input_shape = input_shape
       # quantize the cached activation
-      x1, quant_state1 = per_block_quantization(x1.contiguous(), input_shape[0], quantization_shape)
-      x2, quant_state2 = per_block_quantization(x2.contiguous(), input_shape[1], quantization_shape)
+      bit = 4 if compress_type == 'INT4' else 8
+      x1, quant_state1 = per_block_quantization(x1.contiguous(), input_shape[0], quantization_shape, bit = bit)
+      x2, quant_state2 = per_block_quantization(x2.contiguous(), input_shape[1], quantization_shape, bit = bit)
       ctx.quant_state = [quant_state1, quant_state2]
 
       if compress_type == 'PRUNE':
@@ -45,7 +46,7 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
         x1 = dct_compression(x1, input_shape[0], dct_processor)
         x2 = dct_compression(x2, input_shape[1], dct_processor)
 
-      elif compress_type == 'NAIVE':
+      elif compress_type == 'NAIVE' or compress_type == 'INT4':
         x1 = naive_adjustment(x1, input_shape[0])
         x2 = naive_adjustment(x2, input_shape[1])
 

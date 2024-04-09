@@ -30,10 +30,11 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
             # shape preparation for DCT
             input_shape = x.shape
             ctx.input_shape = input_shape
+            bit = 4 if compress_type == 'INT4' else 8
             # quantize the cached activation
-            x, quant_state = per_block_quantization(x, input_shape, 64)
+            x, quant_state = per_block_quantization(x, input_shape, 64, bit=bit)
             ctx.quant_state = quant_state
-
+            
             if compress_type == 'PRUNE':
                 kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * 0.1)).values
                 x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
@@ -46,7 +47,7 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
             elif compress_type == 'DCT':
                 x = dct_compression(x, input_shape, dct_processor)
 
-            elif compress_type == 'NAIVE':
+            elif compress_type == 'NAIVE' or compress_type == 'INT4':
                 x = naive_adjustment(x, input_shape)
 
         # if the compress type is not JPEG or DCT, then the input will not be compressed(do nothing)
