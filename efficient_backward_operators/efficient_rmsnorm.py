@@ -136,7 +136,7 @@ def _rms_norm_bwd_dwdb(DW,  # pointer to the partial sum of weights gradient
 
 class EfficientMemoryRMSNormFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, normalized_shape, weight, eps, compress_type, jpeg_processor, dct_processor, quantization_shape = 64, use_4bit = False):
+    def forward(ctx, x, normalized_shape, weight, eps, compress_type, jpeg_processor, dct_processor, quantization_shape = 64, use_4bit = False, prune_ratio = 0.75):
         # allocate output
         x = x.contiguous()
         y = torch.empty_like(x)
@@ -166,6 +166,9 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
         if compress_type == 'NF4':
             x, quant_state = F.quantize_nf4(x)
             ctx.quant_state = quant_state
+        elif compress_type == 'PRUNE_ROW':
+            kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * prune_ratio)).values
+            x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
         elif compress_type != 'NONE':
             input_shape = x.shape
             ctx.input_shape = input_shape
@@ -205,7 +208,7 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
         if ctx.needs_inputs_grad:
             if ctx.compress_type == 'NF4':
                 x = F.dequantize_nf4(x, ctx.quant_state)
-            elif ctx.compress_type != 'NONE':
+            elif ctx.compress_type != 'NONE' and ctx.compress_type != 'PRUNE_ROW':
                 quant_state = ctx.quant_state
                 input_shape = ctx.input_shape
                 x = per_block_dequantization(x, input_shape, quant_state, quantization_shape)
@@ -238,11 +241,11 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
                 BLOCK_SIZE_M=32,  #
                 BLOCK_SIZE_N=128)
 
-        return dx, None, dw, None, None, None, None, None, None
+        return dx, None, dw, None, None, None, None, None, None, None
 
 
 class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
-  def __init__(self, normalized_shape, eps=1e-05, elementwise_affine=True, bias=True, compress_type: str = "JPEG", compress_quality: int = 50, quantization_shape: int = 64, use_4bit: bool = False):
+  def __init__(self, normalized_shape, eps=1e-05, elementwise_affine=True, bias=True, compress_type: str = "JPEG", compress_quality: int = 50, quantization_shape: int = 64, use_4bit: bool = False, prune_ratio: float = 0.75):
     super(EfficientMemoryRMSNorm, self).__init__(normalized_shape, eps, elementwise_affine, bias)
     self.compress_type = compress_type
     self.compress_quality = compress_quality
@@ -250,6 +253,7 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
     self.dct_processor = DCTProcessor(quality=compress_quality, interpolation=quantization_shape / 64)
     self.quantization_shape = quantization_shape
     self.use_4bit = use_4bit
+    self.prune_ratio = prune_ratio
 
   def forward(self, x):
     if self.extract_mode:
@@ -264,7 +268,8 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
         self.jpeg_processor,
         self.dct_processor,
         self.quantization_shape,
-        self.use_4bit
+        self.use_4bit,
+        self.prune_ratio
     )
 
 

@@ -9,7 +9,7 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
     # only suitable for batched matmul: (BxMxK) @ (KxR) -> (BxKxR) or (BxKxR) @ (RxN) -> (BxKxN)
     # and LoRA do not have bias
     @staticmethod
-    def forward(ctx, x, w, b, use_bias, compress_type, jpeg_processor, dct_processor):
+    def forward(ctx, x, w, b, use_bias, compress_type, jpeg_processor, dct_processor, prune_ratio):
         #print(x.shape, w.shape)
         if use_bias:
             ctx.needs_inputs_grad = [x.requires_grad, w.requires_grad, b.requires_grad]
@@ -26,6 +26,9 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
             # quantize the cached activation
             x, quant_state = F.quantize_nf4(x)
             ctx.quant_state = quant_state
+        elif compress_type == 'PRUNE_ROW':
+            kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * prune_ratio)).values
+            x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
         elif compress_type != 'NONE':
             # shape preparation for DCT
             input_shape = x.shape
@@ -62,7 +65,7 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
         if ctx.compress_type == 'NF4':
             x = F.dequantize_nf4(x, ctx.quant_state)
         
-        elif ctx.needs_inputs_grad[1] and ctx.compress_type != 'NONE':
+        elif ctx.needs_inputs_grad[1] and ctx.compress_type != 'NONE' and ctx.compress_type != 'PRUNE_ROW':
             quant_state = ctx.quant_state
             input_shape = ctx.input_shape
             # dequantize the cached activation
@@ -76,16 +79,17 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
         if use_bias and ctx.needs_inputs_grad[2]:
             grad_bias = grad_output.sum(0)
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None
         
 
 class EfficientMemoryLinear(torch.nn.Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, compress_type: str = "JPEG", compress_quality: int = 50):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, compress_type: str = "JPEG", compress_quality: int = 50, prune_ratio: float = 0.75):
         super().__init__(in_features, out_features, bias)
         self.compress_type = compress_type
         self.compress_quality = compress_quality
         self.jpeg_processor = JPEGProcessor(quality=compress_quality)
         self.dct_processor = DCTProcessor(quality=compress_quality)
+        self.prune_ratio = prune_ratio
         
     def forward(self, input: torch.Tensor):
         if self.extract_mode:
@@ -98,6 +102,7 @@ class EfficientMemoryLinear(torch.nn.Linear):
             self.bias != None, 
             self.compress_type,
             self.jpeg_processor,
-            self.dct_processor
+            self.dct_processor,
+            self.prune_ratio
         )
     

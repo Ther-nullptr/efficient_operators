@@ -8,16 +8,19 @@ from gact.memory_efficient_function import per_block_quantization, per_block_deq
 
 class EfficientMemorySiLUFunc(torch.autograd.Function):
   @staticmethod
-  def forward(ctx, x, compress_type, jpeg_processor, dct_processor, quantization_shape):
+  def forward(ctx, x, compress_type, jpeg_processor, dct_processor, quantization_shape, prune_ratio):
     result = F.silu(x)
     ctx.needs_inputs_grad = x.requires_grad
     ctx.compress_type = compress_type
     ctx.quantization_shape = quantization_shape
 
     if compress_type == 'NF4':
-        # quantize the cached activation
-        x, quant_state = BF.quantize_nf4(x)
-        ctx.quant_state = quant_state
+      # quantize the cached activation
+      x, quant_state = BF.quantize_nf4(x)
+      ctx.quant_state = quant_state
+    elif compress_type == 'PRUNE_ROW':
+      kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * prune_ratio)).values
+      x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
     elif compress_type != 'NONE':
       input_shape = x.shape
       ctx.input_shape = input_shape
@@ -47,24 +50,25 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
     if ctx.needs_inputs_grad:
       if ctx.compress_type == 'NF4':
         x = BF.dequantize_nf4(x, ctx.quant_state)
-      elif ctx.compress_type != 'NONE':
+      elif ctx.compress_type != 'NONE' and ctx.compress_type != 'PRUNE_ROW':
         quant_state = ctx.quant_state
         input_shape = ctx.input_shape
         x = per_block_dequantization(x, input_shape, quant_state, quantization_shape)
       sigmoid = F.sigmoid(x)
       grad_input = sigmoid * (1 + x - x * sigmoid) * grad_output
 
-    return grad_input, None, None, None, None
+    return grad_input, None, None, None, None, None
   
 
 class EfficientMemorySiLU(torch.nn.Module):
-  def __init__(self, compress_type: str = "JPEG", compress_quality: int = 50, quantization_shape: int = 64):
+  def __init__(self, compress_type: str = "JPEG", compress_quality: int = 50, quantization_shape: int = 64, prune_ratio: float = 0.75):
     super(EfficientMemorySiLU, self).__init__()
     self.compress_type = compress_type
     self.compress_quality = compress_quality
     self.jpeg_processor = JPEGProcessor(quality=compress_quality)
     self.dct_processor = DCTProcessor(quality=compress_quality, interpolation=quantization_shape / 64)
     self.quantization_shape = quantization_shape
+    self.prune_ratio = prune_ratio
 
   def forward(self, input):
     if self.extract_mode:
@@ -75,5 +79,6 @@ class EfficientMemorySiLU(torch.nn.Module):
       self.compress_type,
       self.jpeg_processor,
       self.dct_processor,
-      self.quantization_shape
+      self.quantization_shape,
+      self.prune_ratio
     )

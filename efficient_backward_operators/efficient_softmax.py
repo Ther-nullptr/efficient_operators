@@ -8,7 +8,7 @@ from gact.memory_efficient_function import per_block_quantization, per_block_deq
 
 class EfficientMemorySoftmaxFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, compress_type, jpeg_processor, dct_processor, quantization_shape):
+    def forward(ctx, x, compress_type, jpeg_processor, dct_processor, quantization_shape, prune_ratio):
         y_return = F.softmax(x, dim=-1)
         y = y_return.clone()
 
@@ -16,6 +16,9 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
         if compress_type == 'NF4':
             y, quant_state = BF.quantize_nf4(y)
             ctx.quant_state = quant_state
+        elif compress_type == 'PRUNE_ROW':
+            kth_val = torch.kthvalue(y.abs().flatten(), int(y.numel() * prune_ratio)).values
+            y = torch.where(y.abs() < kth_val, torch.zeros_like(y), y)
         elif compress_type != 'NONE':
             input_shape = x.shape
             ctx.input_shape = input_shape
@@ -43,23 +46,24 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
         if ctx.compress_type == 'NF4':
             y = BF.dequantize_nf4(y, ctx.quant_state)
         
-        elif ctx.compress_type != 'NONE':
+        elif ctx.compress_type != 'NONE' and ctx.compress_type != 'PRUNE_ROW':
             quant_state = ctx.quant_state
             input_shape = ctx.input_shape
             # dequantize the cached activation
             y = per_block_dequantization(y, input_shape, quant_state)
 
-        return (grad_output - (grad_output * y).sum(dim=-1, keepdims=True)) * y, None, None, None, None
+        return (grad_output - (grad_output * y).sum(dim=-1, keepdims=True)) * y, None, None, None, None, None
     
 
 class EfficientMemorySoftmax(torch.nn.Module):
-    def __init__(self, compress_type: str = "JPEG", compress_quality: int = 50, quantization_shape: int = 64):
+    def __init__(self, compress_type: str = "JPEG", compress_quality: int = 50, quantization_shape: int = 64, prune_ratio: float = 0.75):
         super(EfficientMemorySoftmax, self).__init__()
         self.compress_type = compress_type
         self.compress_quality = compress_quality
         self.jpeg_processor = JPEGProcessor(quality=compress_quality)
         self.dct_processor = DCTProcessor(quality=compress_quality)
         self.quantization_shape = quantization_shape
+        self.prune_ratio = prune_ratio
     
     def forward(self, x):
         result = EfficientMemorySoftmaxFunc.apply(
@@ -67,7 +71,8 @@ class EfficientMemorySoftmax(torch.nn.Module):
             self.compress_type,
             self.jpeg_processor,
             self.dct_processor,
-            self.quantization_shape
+            self.quantization_shape,
+            self.prune_ratio
         )
         # notice softmax save the result of output, instead of input
         if self.extract_mode:
