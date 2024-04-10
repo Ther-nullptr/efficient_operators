@@ -3,7 +3,7 @@ import torch
 import bitsandbytes.functional as F
 from gact.dct_processor import DCTProcessor
 from gact.jpeg_processor import JPEGProcessor
-from gact.memory_efficient_function import per_block_quantization, per_block_dequantization, dct_compression, jpeg_compression, naive_adjustment
+from gact.memory_efficient_function import per_block_quantization, per_block_quantization_4bit, per_block_dequantization, dct_compression, jpeg_compression, naive_adjustment
 
 class EfficientMemoryGEMMFunc(torch.autograd.Function):
   @staticmethod
@@ -104,8 +104,8 @@ class EfficientMemoryGEMM(torch.nn.Module):
 
   def forward(self, x1, x2):
     if self.extract_mode:
-        torch.save(x1, f"output/{self.name}_1.pt")
-        torch.save(x2, f"output/{self.name}_2.pt")
+      torch.save(x1, f"output/{self.name}_1.pt")
+      torch.save(x2, f"output/{self.name}_2.pt")
 
     return EfficientMemoryGEMMFunc.apply(
       x1, 
