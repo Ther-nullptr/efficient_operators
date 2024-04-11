@@ -23,6 +23,9 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
         dct_processor,
         quantization_shape,
         prune_ratio,
+        iteration,
+        static_value1,
+        static_value2,
     ):
         result = x1 * x2
         ctx.needs_inputs_grad = [x1.requires_grad, x2.requires_grad]
@@ -35,12 +38,15 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
             x2, quant_state_2 = F.quantize_nf4(x2)
             ctx.quant_state = quant_state_1, quant_state_2
         elif compress_type == "PRUNE_ROW":
-            kth_val_1 = torch.kthvalue(
-                x1.abs().flatten(), int(x1.numel() * prune_ratio)
-            ).values
-            kth_val_2 = torch.kthvalue(
-                x2.abs().flatten(), int(x2.numel() * prune_ratio)
-            ).values
+            if iteration < 10:
+                kth_val_1 = torch.kthvalue(
+                    x1.flatten(), int(x1.numel() * prune_ratio)
+                ).values
+                kth_val_2 = torch.kthvalue(
+                    x2.flatten(), int(x2.numel() * prune_ratio)
+                ).values
+            else:
+                kth_val_1, kth_val_2 = static_value1, static_value2
             x1 = torch.where(x1.abs() < kth_val_1, torch.zeros_like(x1), x1)
             x2 = torch.where(x2.abs() < kth_val_2, torch.zeros_like(x2), x2)
         elif compress_type != "NONE":
@@ -84,9 +90,10 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
                 x2 = naive_adjustment(x2, input_shape[1])
 
         ctx.save_for_backward(x1, x2)
-        return result
+        ctx.mark_non_differentiable(kth_val_1, kth_val_2)
+        return result, kth_val_1, kth_val_2
 
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_kth_val1, grad_kth_val2):
         x1, x2 = ctx.saved_tensors
         quantization_shape = ctx.quantization_shape
         grad_input1, grad_input2 = None, None
@@ -110,7 +117,7 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
             if ctx.needs_inputs_grad[1]:
                 grad_input2 = grad_output * x1
 
-        return grad_input1, grad_input2, None, None, None, None, None
+        return grad_input1, grad_input2, None, None, None, None, None, None, None, None
 
 
 class EfficientMemoryHadamard(torch.nn.Module):
@@ -128,13 +135,16 @@ class EfficientMemoryHadamard(torch.nn.Module):
         self.dct_processor = DCTProcessor(quality=compress_quality)
         self.quantization_shape = quantization_shape
         self.prune_ratio = prune_ratio
+        self.iteration = 0
+        self.static_value1 = None
+        self.static_value2 = None
 
     def forward(self, x1, x2):
         if self.extract_mode:
             torch.save(x1, f"output/{self.name}_1.pt")
             torch.save(x2, f"output/{self.name}_2.pt")
 
-        return EfficientMemoryHadamardFunc.apply(
+        result, static_value1, static_value2 = EfficientMemoryHadamardFunc.apply(
             x1,
             x2,
             self.compress_type,
@@ -143,3 +153,19 @@ class EfficientMemoryHadamard(torch.nn.Module):
             self.quantization_shape,
             self.prune_ratio,
         )
+        # ema
+        self.static_value1 = (
+            static_value1
+            if self.static_value1 is None
+            else (self.iteration * self.static_value1 + static_value1)
+            / (self.iteration + 1)
+        )
+        self.static_value2 = (
+            static_value2
+            if self.static_value2 is None
+            else (self.iteration * self.static_value2 + static_value2)
+            / (self.iteration + 1)
+        )
+        self.iteration += 1
+
+        return result

@@ -163,6 +163,8 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
         quantization_shape=64,
         use_4bit=False,
         prune_ratio=0.75,
+        iteration=0,
+        static_value=0,
     ):
         # allocate output
         x = x.contiguous()
@@ -201,9 +203,12 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
             x, quant_state = F.quantize_nf4(x)
             ctx.quant_state = quant_state
         elif compress_type == "PRUNE_ROW":
-            kth_val = torch.kthvalue(
-                x.abs().flatten(), int(x.numel() * prune_ratio)
-            ).values
+            if iteration < 10:
+                kth_val = torch.kthvalue(
+                    x.abs().flatten(), int(x.numel() * prune_ratio)
+                ).values
+            else:
+                kth_val = static_value
             x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
         elif compress_type != "NONE":
             input_shape = x.shape
@@ -235,14 +240,15 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
                 x = naive_adjustment(x, input_shape, quantization_shape)
 
         ctx.save_for_backward(x, weight, mean, rstd)
+        ctx.mark_non_differentiable(kth_val)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps
         ctx.eps = eps
         y = y.contiguous()
-        return y
+        return y, kth_val
 
     @staticmethod
-    def backward(ctx, dy):
+    def backward(ctx, dy, grad_kth_val):
         x, w, m, v = ctx.saved_tensors
         quantization_shape = ctx.quantization_shape
         dx, dw = None, None
@@ -304,7 +310,7 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
                 BLOCK_SIZE_N=128,
             )
 
-        return dx, None, dw, None, None, None, None, None, None, None
+        return dx, None, None, None, None, None, None, None, None, None
 
 
 class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
@@ -332,12 +338,14 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
         self.quantization_shape = quantization_shape
         self.use_4bit = use_4bit
         self.prune_ratio = prune_ratio
+        self.iteration = 0
+        self.static_value = None
 
     def forward(self, x):
         if self.extract_mode:
             torch.save(x, f"output/{self.name}.pt")
 
-        return EfficientMemoryRMSNormFunc.apply(
+        result, static_value = EfficientMemoryRMSNormFunc.apply(
             x,
             self.normalized_shape,
             self.weight,
@@ -349,3 +357,13 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
             self.use_4bit,
             self.prune_ratio,
         )
+        
+        self.static_value = (
+            static_value
+            if self.static_value is None
+            else (self.iteration * self.static_value + static_value)
+            / (self.iteration + 1)
+        )
+        self.iteration += 1
+
+        return result
