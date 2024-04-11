@@ -3,6 +3,16 @@ import torch
 import bitsandbytes as bnb
 import bitsandbytes.functional as F
 
+def hidden_to_head_shape(x: torch.Tensor, num_heads: int):
+    bsz, seq_len, hidden_dim = x.shape
+    head_dim = hidden_dim // num_heads
+    return x.reshape(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+
+
+def head_to_hidden_shape(x: torch.Tensor):
+    bsz, num_heads, seq_len, head_dim = x.shape
+    return x.transpose(1, 2).reshape(bsz, seq_len, -1)
+
 
 class MixedSparseFullAttentionFunc(torch.autograd.Function):
     @staticmethod
@@ -35,6 +45,7 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
         ####################################
         attention_mask: torch.Tensor,
         use_rotary_pos_enc: bool,
+        num_heads: int,
     ):
         # compute q,k,v
         # forward process: q_proj
@@ -57,6 +68,11 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
         v_lora_a = x @ w_v_lora_a
         v_lora = v_lora_a @ w_v_lora_b
         v = v_main + v_lora
+        
+        # reshape
+        q = hidden_to_head_shape(q, num_heads)
+        k = hidden_to_head_shape(k, num_heads)
+        v = hidden_to_head_shape(v, num_heads)
 
         # TODO: apply pos_emb to q & k
         if use_rotary_pos_enc:
@@ -77,6 +93,9 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
 
         # forward: O = A @ V
         o = a @ v
+        
+        # reshape
+        o = head_to_hidden_shape(o)
 
         # forward process: o_proj
         w_o_dequant = F.dequantize_nf4(w_o, w_o_quant_state).to(x.dtype).t()
@@ -175,6 +194,9 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
         grad_w_o_lora_b = o_lora_a.mT @ grad_output
         w_o_dequant = F.dequantize_nf4(w_o, w_o_quant_state).to(grad_output.dtype).t()
         grad_o = grad_output @ w_o_dequant.T + grad_output @ w_o_lora_b.T @ w_o_lora_a.T
+        
+        # reshape
+        grad_o = hidden_to_head_shape(grad_o, num_heads)
 
         # backward of second GEMM: O = A @ V
         # d L / d V = A.T @ d L / d O
@@ -192,6 +214,11 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
         grad_q = grad_s @ k
 
         # TODO apply pos_emb to q & k
+        
+        # reshape
+        grad_q = head_to_hidden_shape(grad_q)
+        grad_k = head_to_hidden_shape(grad_k)
+        grad_v = head_to_hidden_shape(grad_v)
 
         # backward of q_proj
         grad_w_q_lora_a = q.mT @ (grad_q @ w_q_lora_b.T)
@@ -247,15 +274,11 @@ class MixedSparseFullAttention(torch.nn.Module):
         self,
         hidden_dim: int,
         num_heads: int,
-        quantization: bool = False,
-        layer_id: int = 0,
     ):
         super(MixedSparseFullAttention, self).__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.quantization = quantization
         self.iteration = 0
-        self.layer_id = layer_id
 
     def forward(
         self,
@@ -303,5 +326,6 @@ class MixedSparseFullAttention(torch.nn.Module):
             o_proj_lora_b.default.weight.T,
             ####################################
             attention_mask,
-            use_rotary_pos_enc
+            use_rotary_pos_enc,
+            self.num_heads,
         )
