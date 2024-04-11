@@ -223,7 +223,7 @@ def _layer_norm_bwd_dwdb(DW,  # pointer to the partial sum of weights gradient
 
 class EfficientMemoryLayerNormFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, normalized_shape, weight, bias, eps, compress_type, jpeg_processor, dct_processor, quantization_shape = 64, prune_ratio = 0.75):
+    def forward(ctx, x, normalized_shape, weight, bias, eps, compress_type, jpeg_processor, dct_processor, quantization_shape, prune_ratio, iteration, static_value):
         # allocate output
         x = x.contiguous()
         y = torch.empty_like(x)
@@ -254,7 +254,10 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
             x, quant_state = F.quantize_nf4(x)
             ctx.quant_state = quant_state
         elif compress_type == 'PRUNE_ROW':
-            kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * prune_ratio)).values
+            if iteration < 10:
+                kth_val = torch.kthvalue(x.abs().flatten(), int(x.numel() * prune_ratio)).values
+            else:
+                kth_val = static_value
             x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
         elif compress_type != 'NONE':
             input_shape = x.shape
@@ -282,7 +285,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
         ctx.num_warps = num_warps
         ctx.eps = eps
         y = y.contiguous()
-        return y
+        return y, kth_val
 
     @staticmethod
     def backward(ctx, dy):
@@ -340,12 +343,14 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
     self.dct_processor = DCTProcessor(quality=compress_quality, interpolation=quantization_shape / 64)
     self.quantization_shape = quantization_shape
     self.prune_ratio = prune_ratio
+    self.iteration = 0
+    self.static_value = None
 
   def forward(self, x):
     if self.extract_mode:
         torch.save(x, f"output/{self.name}.pt")
 
-    return EfficientMemoryLayerNormFunc.apply(
+    result, static_value = EfficientMemoryLayerNormFunc.apply(
         x, 
         self.normalized_shape, 
         self.weight, 
@@ -355,7 +360,13 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
         self.jpeg_processor,
         self.dct_processor,
         self.quantization_shape,
-        self.prune_ratio
+        self.prune_ratio,
+        self.iteration,
+        self.static_value
     )
+    
+    self.static_value = static_value if self.static_value is None else (self.iteration * self.static_value + static_value) / (self.iteration + 1)
+    self.iteration += 1
 
+    return result
 

@@ -7,7 +7,7 @@ from gact.memory_efficient_function import per_block_quantization, per_block_qua
 
 class EfficientMemoryGEMMFunc(torch.autograd.Function):
   @staticmethod
-  def forward(ctx, x1, x2, compress_type, jpeg_processor, dct_processor, quantization_shape, attn_first, prune_ratio):
+  def forward(ctx, x1, x2, compress_type, jpeg_processor, dct_processor, quantization_shape, attn_first, prune_ratio, iteration, static_value1, static_value2):
     result = x1 @ x2
     ctx.needs_inputs_grad = [x1.requires_grad, x2.requires_grad]
     ctx.compress_type = compress_type
@@ -19,8 +19,11 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
       x2, quant_state_2 = F.quantize_nf4(x2)
       ctx.quant_state = quant_state_1, quant_state_2
     elif compress_type == 'PRUNE_ROW':
-      kth_val_1 = torch.kthvalue(x1.abs().flatten(), int(x1.numel() * prune_ratio)).values
-      kth_val_2 = torch.kthvalue(x2.abs().flatten(), int(x2.numel() * prune_ratio)).values
+      if iteration < 10:
+        kth_val_1 = torch.kthvalue(x1.flatten(), int(x1.numel() * prune_ratio)).values
+        kth_val_2 = torch.kthvalue(x2.flatten(), int(x2.numel() * prune_ratio)).values
+      else:
+        kth_val_1, kth_val_2 = static_value1, static_value2
       x1 = torch.where(x1.abs() < kth_val_1, torch.zeros_like(x1), x1)
       x2 = torch.where(x2.abs() < kth_val_2, torch.zeros_like(x2), x2)
     elif compress_type != 'NONE':
@@ -66,7 +69,7 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
         x2 = naive_adjustment(x2, input_shape[1])
 
     ctx.save_for_backward(x1, x2)
-    return result
+    return result, kth_val_1, kth_val_2
 
   def backward(ctx, grad_output):
     x1, x2 = ctx.saved_tensors
@@ -88,11 +91,11 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
       if ctx.needs_inputs_grad[1]:
         grad_input2 = x1.transpose(-2, -1) @ grad_output
 
-    return grad_input1, grad_input2, None, None, None, None, None, None
+    return grad_input1, grad_input2, None, None, None, None, None, None, None, None, None
   
 
 class EfficientMemoryGEMM(torch.nn.Module):
-  def __init__(self, compress_type: str = "JPEG", compress_quality: int = 50, quantization_shape: int = 64, attn_first: bool = False, prune_ratio: float = 0.75):
+  def __init__(self, compress_type: str = "JPEG", compress_quality: int = 50, quantization_shape: int = 64, attn_first: bool = False, prune_ratio: float = 0.90):
     super().__init__()
     self.compress_type = compress_type
     self.compress_quality = compress_quality
@@ -101,13 +104,16 @@ class EfficientMemoryGEMM(torch.nn.Module):
     self.quantization_shape = quantization_shape
     self.attn_first = attn_first
     self.prune_ratio = prune_ratio
+    self.iteration = 0
+    self.static_value1 = None
+    self.static_value2 = None
 
   def forward(self, x1, x2):
     if self.extract_mode:
       torch.save(x1, f"output/{self.name}_1.pt")
       torch.save(x2, f"output/{self.name}_2.pt")
 
-    return EfficientMemoryGEMMFunc.apply(
+    result, static_value1, static_value2 = EfficientMemoryGEMMFunc.apply(
       x1, 
       x2,
       self.compress_type,
@@ -115,5 +121,14 @@ class EfficientMemoryGEMM(torch.nn.Module):
       self.dct_processor,
       self.quantization_shape,
       self.attn_first,
-      self.prune_ratio
+      self.prune_ratio,
+      self.iteration,
+      self.static_value1,
+      self.static_value2
     )
+    # ema
+    self.static_value1 = static_value1 if self.static_value1 is None else (self.iteration * self.static_value1 + static_value1) / (self.iteration + 1)
+    self.static_value2 = static_value2 if self.static_value2 is None else (self.iteration * self.static_value2 + static_value2) / (self.iteration + 1)
+    self.iteration += 1
+    
+    return result

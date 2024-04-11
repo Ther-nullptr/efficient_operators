@@ -8,7 +8,7 @@ from gact.memory_efficient_function import per_block_quantization, per_block_deq
 
 class EfficientMemorySoftmaxFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, compress_type, jpeg_processor, dct_processor, quantization_shape, prune_ratio):
+    def forward(ctx, x, compress_type, jpeg_processor, dct_processor, quantization_shape, prune_ratio, iteration, static_value):
         y_return = F.softmax(x, dim=-1)
         y = y_return.clone()
 
@@ -17,7 +17,10 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
             y, quant_state = BF.quantize_nf4(y)
             ctx.quant_state = quant_state
         elif compress_type == 'PRUNE_ROW':
-            kth_val = torch.kthvalue(y.abs().flatten(), int(y.numel() * prune_ratio)).values
+            if iteration < 10:
+                kth_val = torch.kthvalue(y.abs().flatten(), int(y.numel() * prune_ratio)).values
+            else:
+                kth_val = static_value
             y = torch.where(y.abs() < kth_val, torch.zeros_like(y), y)
         elif compress_type != 'NONE':
             input_shape = x.shape
@@ -37,7 +40,7 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
 
         ctx.save_for_backward(y)
         ctx.compress_type = compress_type
-        return y_return
+        return y_return, kth_val
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -52,7 +55,7 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
             # dequantize the cached activation
             y = per_block_dequantization(y, input_shape, quant_state)
 
-        return (grad_output - (grad_output * y).sum(dim=-1, keepdims=True)) * y, None, None, None, None, None
+        return (grad_output - (grad_output * y).sum(dim=-1, keepdims=True)) * y, None, None, None, None, None, None, None
     
 
 class EfficientMemorySoftmax(torch.nn.Module):
@@ -64,16 +67,24 @@ class EfficientMemorySoftmax(torch.nn.Module):
         self.dct_processor = DCTProcessor(quality=compress_quality)
         self.quantization_shape = quantization_shape
         self.prune_ratio = prune_ratio
+        self.iteration = 0
+        self.static_value = None
     
     def forward(self, x):
-        result = EfficientMemorySoftmaxFunc.apply(
+        result, static_value = EfficientMemorySoftmaxFunc.apply(
             x,
             self.compress_type,
             self.jpeg_processor,
             self.dct_processor,
             self.quantization_shape,
-            self.prune_ratio
+            self.prune_ratio,
+            self.iteration,
+            self.static_value
         )
+        
+        self.static_value = static_value if self.static_value is None else (self.iteration * self.static_value + static_value) / (self.iteration + 1)
+        self.iteration += 1
+        
         # notice softmax save the result of output, instead of input
         if self.extract_mode:
             torch.save(result, f"output/{self.name}.pt")
