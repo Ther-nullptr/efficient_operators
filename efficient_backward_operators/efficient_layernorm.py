@@ -321,6 +321,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
                 x = naive_adjustment(x, input_shape, quantization_shape)
 
         ctx.save_for_backward(x, weight, bias, mean, rstd)
+        ctx.mark_non_differentiable(kth_val)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps
         ctx.eps = eps
@@ -328,7 +329,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
         return y, kth_val
 
     @staticmethod
-    def backward(ctx, dy):
+    def backward(ctx, dy, grad_kth_val):
         x, w, b, m, v = ctx.saved_tensors
         quantization_shape = ctx.quantization_shape
         dx, dw, db = None, None, None
@@ -398,7 +399,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
                 BLOCK_SIZE_N=128,
             )
 
-        return dx, None, dw, db, None, None, None, None, None, None
+        return dx, None, dw, db, None, None, None, None, None, None, None, None
 
 
 class EfficientMemoryLayerNorm(torch.nn.LayerNorm):

@@ -102,9 +102,10 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
                 x2 = naive_adjustment(x2, input_shape[1])
 
         ctx.save_for_backward(x1, x2)
+        ctx.mark_non_differentiable(kth_val_1, kth_val_2)
         return result, kth_val_1, kth_val_2
 
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_kth_val1, grad_kth_val2):
         x1, x2 = ctx.saved_tensors
         quantization_shape = ctx.quantization_shape
         grad_input1, grad_input2 = None, None

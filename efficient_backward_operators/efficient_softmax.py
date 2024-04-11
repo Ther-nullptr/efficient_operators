@@ -58,11 +58,12 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
                 y = naive_adjustment(y, input_shape, quantization_shape)
 
         ctx.save_for_backward(y)
+        ctx.mark_non_differentiable(kth_val)
         ctx.compress_type = compress_type
         return y_return, kth_val
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_kth_val):
         (y,) = ctx.saved_tensors
 
         if ctx.compress_type == "NF4":

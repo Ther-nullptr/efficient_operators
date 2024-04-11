@@ -81,10 +81,11 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
 
         # if the compress type is not JPEG or DCT, then the input will not be compressed(do nothing)
         ctx.save_for_backward(x, w)
+        ctx.mark_non_differentiable(kth_val)
         return output, kth_val
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_kth_val):
         use_bias = ctx.use_bias
         x, w = ctx.saved_tensors
 
