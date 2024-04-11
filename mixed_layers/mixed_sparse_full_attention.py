@@ -152,8 +152,6 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        min_indices = ctx.min_indices
-
         (
             x,
             q_lora_a,
@@ -219,6 +217,10 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
         grad_q = head_to_hidden_shape(grad_q)
         grad_k = head_to_hidden_shape(grad_k)
         grad_v = head_to_hidden_shape(grad_v)
+        
+        q = head_to_hidden_shape(q)
+        k = head_to_hidden_shape(k)
+        v = head_to_hidden_shape(v)
 
         # backward of q_proj
         grad_w_q_lora_a = q.mT @ (grad_q @ w_q_lora_b.T)
@@ -266,6 +268,7 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
             ####################################
             None,
             None,
+            None
         )
 
 
