@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def _seeded_dropout(
     x_ptr,
@@ -59,7 +60,7 @@ class EfficientMemoryDropoutFunc(torch.autograd.Function):
         output = torch.empty_like(x)
         assert x.is_contiguous()
         n_elements = x.numel()
-        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
         _seeded_dropout[grid](x, output, n_elements, p, seed, BLOCK_SIZE=1024)
         return output
 
@@ -69,10 +70,12 @@ class EfficientMemoryDropoutFunc(torch.autograd.Function):
         grad_in = torch.empty_like(grad_out)
         assert grad_out.is_contiguous()
         n_elements = grad_out.numel()
-        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-        _seeded_dropout_backward[grid](grad_out, grad_in, n_elements, p, seed, BLOCK_SIZE=1024)
+        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+        _seeded_dropout_backward[grid](
+            grad_out, grad_in, n_elements, p, seed, BLOCK_SIZE=1024
+        )
         return grad_in, None, None
-    
+
 
 class EfficientMemoryDropout(torch.nn.Module):
     def __init__(self, p):
