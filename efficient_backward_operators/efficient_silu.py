@@ -23,6 +23,8 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
         dct_processor,
         quantization_shape,
         prune_ratio,
+        iteration,
+        static_value,
     ):
         result = F.silu(x)
         ctx.needs_inputs_grad = x.requires_grad
@@ -34,10 +36,13 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
             x, quant_state = BF.quantize_nf4(x)
             ctx.quant_state = quant_state
         elif compress_type == "PRUNE_ROW":
-            kth_val = torch.kthvalue(
-                x.abs().flatten(), int(x.numel() * prune_ratio)
-            ).values
-            x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
+            if iteration < 10:
+                kth_val = torch.kthvalue(
+                    x.flatten(), int(x.numel() * prune_ratio)
+                ).values
+            else:
+                kth_val = static_value
+            x = torch.where(x < kth_val, torch.zeros_like(x) - 10, x)
         elif compress_type != "NONE":
             input_shape = x.shape
             ctx.input_shape = input_shape
@@ -58,10 +63,11 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
                 x = naive_adjustment(x, input_shape, quantization_shape)
 
         ctx.save_for_backward(x)
-        return result
+        ctx.mark_non_differentiable(kth_val)
+        return result, kth_val
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_kth_val):
         (x,) = ctx.saved_tensors
         quantization_shape = ctx.quantization_shape
         grad_input = None
@@ -98,12 +104,14 @@ class EfficientMemorySiLU(torch.nn.Module):
         )
         self.quantization_shape = quantization_shape
         self.prune_ratio = prune_ratio
+        self.iteration = 0
+        self.static_value = None
 
     def forward(self, input):
         if self.extract_mode:
             torch.save(input, f"output/{self.name}.pt")
 
-        return EfficientMemorySiLUFunc.apply(
+        result, static_value = EfficientMemorySiLUFunc.apply(
             input,
             self.compress_type,
             self.jpeg_processor,
@@ -111,3 +119,13 @@ class EfficientMemorySiLU(torch.nn.Module):
             self.quantization_shape,
             self.prune_ratio,
         )
+        # ema
+        self.static_value = (
+            static_value
+            if self.static_value is None
+            else (self.iteration * self.static_value + static_value)
+            / (self.iteration + 1)
+        )
+        self.iteration += 1
+
+        return result
