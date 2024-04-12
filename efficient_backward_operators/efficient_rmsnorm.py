@@ -242,11 +242,11 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
             elif compress_type == "NAIVE":
                 x = naive_adjustment(x, input_shape, quantization_shape)
 
+        ctx.mark_non_differentiable(kth_val)
         ctx.save_for_backward(x, weight, mean, rstd)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps
         ctx.eps = eps
-        ctx.mark_non_differentiable(kth_val)
         y = y.contiguous()
         return y, kth_val
 
@@ -359,6 +359,8 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
             self.quantization_shape,
             self.use_4bit,
             self.prune_ratio,
+            self.iteration,
+            self.static_value,
         )
         
         self.static_value = (
