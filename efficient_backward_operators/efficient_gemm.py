@@ -33,7 +33,9 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
         ctx.needs_inputs_grad = [x1.requires_grad, x2.requires_grad]
         ctx.compress_type = compress_type
         ctx.quantization_shape = quantization_shape
-
+        
+        kth_val_1 = torch.tensor(0.0, device=x1.device)
+        kth_val_2 = torch.tensor(0.0, device=x2.device)
         if compress_type == "NF4":
             # quantize the cached activation
             x1, quant_state_1 = F.quantize_nf4(x1)
@@ -49,8 +51,10 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
                 ).values
             else:
                 kth_val_1, kth_val_2 = static_value1, static_value2
-            x1 = torch.where(x1.abs() < kth_val_1, torch.zeros_like(x1), x1)
-            x2 = torch.where(x2.abs() < kth_val_2, torch.zeros_like(x2), x2)
+            mask_1 = x1.abs() > kth_val_1
+            x1 = x1 * mask_1
+            mask_2 = x2.abs() > kth_val_2
+            x2 = x2 * mask_2
         elif compress_type != "NONE":
             # shape preparation for DCT
             input_shape = [x1.shape, x2.shape]
@@ -100,9 +104,8 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
                 #   x1[x1 < -100] = -128
                 x1 = naive_adjustment(x1, input_shape[0])
                 x2 = naive_adjustment(x2, input_shape[1])
-
-        ctx.save_for_backward(x1, x2)
         ctx.mark_non_differentiable(kth_val_1, kth_val_2)
+        ctx.save_for_backward(x1, x2)
         return result, kth_val_1, kth_val_2
 
     def backward(ctx, grad_output, grad_kth_val1, grad_kth_val2):

@@ -32,6 +32,8 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
         ctx.compress_type = compress_type
         ctx.quantization_shape = quantization_shape
 
+        kth_val_1 = torch.tensor(0.0, device=x1.device)
+        kth_val_2 = torch.tensor(0.0, device=x2.device)
         if compress_type == "NF4":
             # quantize the cached activation
             x1, quant_state_1 = F.quantize_nf4(x1)
@@ -47,8 +49,10 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
                 ).values
             else:
                 kth_val_1, kth_val_2 = static_value1, static_value2
-            x1 = torch.where(x1.abs() < kth_val_1, torch.zeros_like(x1), x1)
-            x2 = torch.where(x2.abs() < kth_val_2, torch.zeros_like(x2), x2)
+            mask_1 = x1.abs() > kth_val_1
+            x1 = x1 * mask_1
+            mask_2 = x2.abs() > kth_val_2
+            x2 = x2 * mask_2
         elif compress_type != "NONE":
             # shape preparation for DCT
             input_shape = [x1.shape, x2.shape]
@@ -152,6 +156,9 @@ class EfficientMemoryHadamard(torch.nn.Module):
             self.dct_processor,
             self.quantization_shape,
             self.prune_ratio,
+            self.iteration,
+            self.static_value1,
+            self.static_value2,
         )
         # ema
         self.static_value1 = (

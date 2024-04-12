@@ -42,7 +42,9 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
                 ).values
             else:
                 kth_val = static_value
-            x = torch.where(x < kth_val, torch.zeros_like(x) - 10, x)
+            mask = x > kth_val # when mask is 0, set them to -10, otherwise keep the original value
+            x = (~mask) * -10 + mask * x
+            # x = torch.where(, torch.zeros_like(x) - 10, x)
         elif compress_type != "NONE":
             input_shape = x.shape
             ctx.input_shape = input_shape
@@ -62,9 +64,8 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
 
             elif compress_type == "NAIVE":
                 x = naive_adjustment(x, input_shape, quantization_shape)
-
-        ctx.save_for_backward(x)
         ctx.mark_non_differentiable(kth_val)
+        ctx.save_for_backward(x)
         return result, kth_val
 
     @staticmethod

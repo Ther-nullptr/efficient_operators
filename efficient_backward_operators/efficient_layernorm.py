@@ -287,7 +287,8 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
         )
         ctx.compress_type = compress_type
         ctx.quantization_shape = quantization_shape
-
+        
+        kth_val = torch.tensor(0.0, device=x.device)
         if compress_type == "NF4":
             x, quant_state = F.quantize_nf4(x)
             ctx.quant_state = quant_state
@@ -298,7 +299,8 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
                 ).values
             else:
                 kth_val = static_value
-            x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
+            mask = x.abs() > kth_val
+            x = x * mask
         elif compress_type != "NONE":
             input_shape = x.shape
             ctx.input_shape = input_shape
@@ -319,9 +321,9 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
 
             elif compress_type == "NAIVE":
                 x = naive_adjustment(x, input_shape, quantization_shape)
-
-        ctx.save_for_backward(x, weight, bias, mean, rstd)
+        
         ctx.mark_non_differentiable(kth_val)
+        ctx.save_for_backward(x, weight, bias, mean, rstd)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps
         ctx.eps = eps

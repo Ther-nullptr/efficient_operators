@@ -42,7 +42,8 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
             )  # TODO: what is the dimension of b?
         else:
             output = x @ w.transpose(0, 1)
-
+        
+        kth_val = None
         if compress_type == "NF4":
             # quantize the cached activation
             x, quant_state = F.quantize_nf4(x)
@@ -54,7 +55,8 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
                 ).values
             else:
                 kth_val = static_value
-            x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
+            mask = x.abs() > kth_val
+            x = x * mask
         elif compress_type != "NONE":
             # shape preparation for DCT
             input_shape = x.shape
@@ -81,7 +83,11 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
 
         # if the compress type is not JPEG or DCT, then the input will not be compressed(do nothing)
         ctx.save_for_backward(x, w)
+        
+        if kth_val is None:
+            kth_val = torch.tensor(0.0)
         ctx.mark_non_differentiable(kth_val)
+        
         return output, kth_val
 
     @staticmethod

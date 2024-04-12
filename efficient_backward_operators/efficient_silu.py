@@ -30,6 +30,8 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
         ctx.needs_inputs_grad = x.requires_grad
         ctx.compress_type = compress_type
         ctx.quantization_shape = quantization_shape
+        
+        kth_val = torch.tensor(0.0, device=x.device)
 
         if compress_type == "NF4":
             # quantize the cached activation
@@ -42,7 +44,8 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
                 ).values
             else:
                 kth_val = static_value
-            x = torch.where(x < kth_val, torch.zeros_like(x) - 10, x)
+            mask = x > kth_val # when mask is 0, set them to -10, otherwise keep the original value
+            x = (~mask) * -10 + mask * x
         elif compress_type != "NONE":
             input_shape = x.shape
             ctx.input_shape = input_shape
@@ -84,7 +87,7 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
             sigmoid = F.sigmoid(x)
             grad_input = sigmoid * (1 + x - x * sigmoid) * grad_output
 
-        return grad_input, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None
 
 
 class EfficientMemorySiLU(torch.nn.Module):
@@ -118,6 +121,8 @@ class EfficientMemorySiLU(torch.nn.Module):
             self.dct_processor,
             self.quantization_shape,
             self.prune_ratio,
+            self.iteration,
+            self.static_value,
         )
         # ema
         self.static_value = (

@@ -28,6 +28,8 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
     ):
         y_return = F.softmax(x, dim=-1)
         y = y_return.clone()
+        
+        kth_val = torch.tensor(0.0, device=x.device)
 
         # save output instead of input
         if compress_type == "NF4":
@@ -40,7 +42,8 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
                 ).values
             else:
                 kth_val = static_value
-            y = torch.where(y.abs() < kth_val, torch.zeros_like(y), y)
+            mask = y > kth_val
+            y = y * mask
         elif compress_type != "NONE":
             input_shape = x.shape
             ctx.input_shape = input_shape
