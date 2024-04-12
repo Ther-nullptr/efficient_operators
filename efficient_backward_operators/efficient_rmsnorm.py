@@ -313,7 +313,7 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
                 BLOCK_SIZE_N=128,
             )
 
-        return dx, None, None, None, None, None, None, None, None, None
+        return dx, None, None, None, None, None, None, None, None, None, None, None
 
 
 class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
