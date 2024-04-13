@@ -5,9 +5,9 @@ import bitsandbytes as bnb
 import torch.nn.functional as F
 import bitsandbytes.functional as BF
 
-from layernorm_kernels import layernorm_forward, layernorm_backward
-from rmsnorm_kernels import rmsnorm_forward, rmsnorm_backward
-from rope_kernels import rope_forward, rope_backward
+from .layernorm_kernels import layernorm_forward, layernorm_backward
+from .rmsnorm_kernels import rmsnorm_forward, rmsnorm_backward
+from .rope_kernels import rope_forward, rope_backward
 
 def hidden_to_head_shape(x: torch.Tensor, num_heads: int):
     bsz, seq_len, hidden_dim = x.shape
@@ -78,36 +78,56 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         attention_mask: torch.Tensor,
         norm_mode: str,
         num_heads: int,
+        head_dim: int,
         use_rotary_pos_enc: bool,
         small_value_approx: bool,
         activation_forward: str,
         activation_backward: str,
     ):
+        x = x.to(torch.bfloat16)
         x_1_res = x # keep the original input for residual connection
+        
+        # TODO: fix this... covert all the lora weights & bias to bfloat16
+        w_q_lora_a = w_q_lora_a.to(torch.bfloat16)
+        w_q_lora_b = w_q_lora_b.to(torch.bfloat16)
+        w_k_lora_a = w_k_lora_a.to(torch.bfloat16)
+        w_k_lora_b = w_k_lora_b.to(torch.bfloat16)
+        w_v_lora_a = w_v_lora_a.to(torch.bfloat16)
+        w_v_lora_b = w_v_lora_b.to(torch.bfloat16)
+        w_o_lora_a = w_o_lora_a.to(torch.bfloat16)
+        w_o_lora_b = w_o_lora_b.to(torch.bfloat16)
+        w_gate_lora_a = w_gate_lora_a.to(torch.bfloat16)
+        w_gate_lora_b = w_gate_lora_b.to(torch.bfloat16)
+        w_up_lora_a = w_up_lora_a.to(torch.bfloat16)
+        w_up_lora_b = w_up_lora_b.to(torch.bfloat16)
+        w_down_lora_a = w_down_lora_a.to(torch.bfloat16)
+        w_down_lora_b = w_down_lora_b.to(torch.bfloat16)
+        
+        b_q, b_k, b_v, b_o, b_gate, b_up, b_down = b_q.to(torch.bfloat16), b_k.to(torch.bfloat16), b_v.to(torch.bfloat16), b_o.to(torch.bfloat16), b_gate.to(torch.bfloat16), b_up.to(torch.bfloat16), b_down.to(torch.bfloat16)
         
         # layernorm or rmsnorm
         if norm_mode == "layernorm":
-            x_after_norm_1, mean_1, rstd_1 = layernorm_forward(x, norm_weight_1, norm_bias_1, eps = 1e-10)
+            x_after_norm_1, mean_1, rstd_1, _, _ = layernorm_forward(x, norm_weight_1, norm_bias_1, eps = 1e-10)
         else:
-            x_after_norm_1, mean_1, rstd_1 = rmsnorm_forward(x, norm_weight_1, eps = 1e-10)
+            x_after_norm_1, mean_1, rstd_1, _, _ = rmsnorm_forward(x, norm_weight_1, eps = 1e-10)
             
         # compute q,k,v
         # forward process: q_proj
-        w_q_dequant = F.dequantize_nf4(w_q, w_q_quant_state).to(x_after_norm_1.dtype).t()
+        w_q_dequant = BF.dequantize_nf4(w_q, w_q_quant_state).to(x_after_norm_1.dtype).t()
         q_main = x_after_norm_1 @ w_q_dequant + b_q if b_q is not None else x_after_norm_1 @ w_q_dequant
         q_lora_a = x_after_norm_1 @ w_q_lora_a
         q_lora = q_lora_a @ w_q_lora_b
         q = q_main + q_lora
 
         # forward process: k_proj
-        w_k_dequant = F.dequantize_nf4(w_k, w_k_quant_state).to(x_after_norm_1.dtype).t()
+        w_k_dequant = BF.dequantize_nf4(w_k, w_k_quant_state).to(x_after_norm_1.dtype).t()
         k_main = x_after_norm_1 @ w_k_dequant + b_k if b_k is not None else x_after_norm_1 @ w_k_dequant
         k_lora_a = x_after_norm_1 @ w_k_lora_a
         k_lora = k_lora_a @ w_k_lora_b
         k = k_main + k_lora
 
         # forward process: v_proj
-        w_v_dequant = F.dequantize_nf4(w_v, w_v_quant_state).to(x_after_norm_1.dtype).t()
+        w_v_dequant = BF.dequantize_nf4(w_v, w_v_quant_state).to(x_after_norm_1.dtype).t()
         v_main = x_after_norm_1 @ w_v_dequant + b_v if b_v is not None else x_after_norm_1 @ w_v_dequant
         v_lora_a = x_after_norm_1 @ w_v_lora_a
         v_lora = v_lora_a @ w_v_lora_b
@@ -136,7 +156,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             s = s + attention_mask
 
         # forward: softmax
-        a = torch.softmax(s, dim=-1)  # [bsz, num_heads, q_len, q_len]
+        a = torch.softmax(s, dim=-1).to(torch.bfloat16)  # [bsz, num_heads, q_len, q_len]
 
         # forward: O = A @ V
         o = a @ v
@@ -145,7 +165,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         o = head_to_hidden_shape(o)
 
         # forward process: o_proj
-        w_o_dequant = F.dequantize_nf4(w_o, w_o_quant_state).to(x.dtype).t()
+        w_o_dequant = BF.dequantize_nf4(w_o, w_o_quant_state).to(x.dtype).t()
         o_main = o @ w_o_dequant + b_o if b_o is not None else o @ w_o_dequant
         o_lora_a = o @ w_o_lora_a
         o_lora = o_lora_a @ w_o_lora_b
@@ -163,19 +183,19 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         
         # layernorm or rmsnorm
         if norm_mode == "layernorm":
-            x_after_norm_2, mean_2, rstd_2 = layernorm_forward(x_1_final, norm_weight_2, norm_bias_2, eps = 1e-10)
+            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = layernorm_forward(x_1_final, norm_weight_2, norm_bias_2, eps = 1e-10)
         else:
-            x_after_norm_2, mean_2, rstd_2 = rmsnorm_forward(x_1_final, norm_weight_2, eps = 1e-10)
+            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = rmsnorm_forward(x_1_final, norm_weight_2, eps = 1e-10)
             
         # forward process: gate_proj
-        w_gate_dequant = F.dequantize_nf4(w_gate, w_gate_quant_state).to(x_after_norm_2.dtype).t()
+        w_gate_dequant = BF.dequantize_nf4(w_gate, w_gate_quant_state).to(x_after_norm_2.dtype).t()
         gate_main = x_after_norm_2 @ w_gate_dequant + b_gate if b_gate is not None else x_after_norm_2 @ w_gate_dequant
         gate_lora_a = x_after_norm_2 @ w_gate_lora_a
         gate_lora = gate_lora_a @ w_gate_lora_b
         gate = gate_main + gate_lora
         
         # forward process: up_proj
-        w_up_dequant = F.dequantize_4bit(w_up, w_up_quant_state).to(x_after_norm_2.dtype).t()
+        w_up_dequant = BF.dequantize_nf4(w_up, w_up_quant_state).to(x_after_norm_2.dtype).t()
         up_main = x_after_norm_2 @ w_up_dequant + b_up if b_up is not None else x_after_norm_2 @ w_up_dequant
         up_lora_a = x_after_norm_2 @ w_up_lora_a
         up_lora = up_lora_a @ w_up_lora_b
@@ -184,6 +204,8 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         # apply activation function (for gate)
         if activation_forward == "relu":
             fn = torch.relu(gate)
+            # TODO: now only support relu, generate mask
+            gate = gate > 0 # now up is a mask
         elif activation_forward == "silu":
             fn = torch.silu(gate)
         elif activation_forward == "gelu":
@@ -193,7 +215,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         hadamard = up * fn
             
         # forward process: down_proj
-        w_down_dequant = F.dequantize_4bit(w_down, w_down_quant_state).to(hadamard.dtype).t()
+        w_down_dequant = BF.dequantize_nf4(w_down, w_down_quant_state).to(hadamard.dtype).t()
         down_main = (
             hadamard @ w_down_dequant + b_down if b_down is not None else hadamard @ w_down_dequant
         )
@@ -285,6 +307,12 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         )
         ctx.norm_mode = norm_mode
         ctx.num_heads = num_heads
+        ctx.use_rotary_pos_enc = use_rotary_pos_enc
+        ctx.block_size = block_size
+        ctx.num_warps = num_warps
+        ctx.head_dim = head_dim
+        
+        x_2_final = x_2_final.to(torch.float32) #! for lm head
         
         return x_2_final
     
@@ -371,6 +399,8 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             w_down_lora_b,
         ) = ctx.saved_tensors
         
+        grad_output = grad_output.to(torch.bfloat16)
+        
         # down proj part
         # d L / d w_down_lora_a = x2.T @ d L / d y2 @ w_down_lora_b.T
         grad_w_down_lora_a = hadamard.mT @ (grad_output @ w_down_lora_b.T)
@@ -378,7 +408,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         grad_w_down_lora_b = down_lora_a.mT @ grad_output
         # d L / d x2 = d L / d y2 @ w_down.T + d L / d y2 @ w_down_lora_b.T @ w_down_lora_a.T
         w_down_dequant = (
-            F.dequantize_4bit(w_down, w_down_quant_state).to(grad_output.dtype).t()
+            BF.dequantize_nf4(w_down, w_down_quant_state).to(grad_output.dtype).t()
         )
         grad_hadamard = (
             grad_output @ w_down_dequant.T
@@ -392,12 +422,12 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         # TODO: activation backward
         # activation part
         grad_gate = grad_fn.clone()
-        grad_gate[gate] = 0
+        grad_gate *= gate
         
         # gate proj part
         grad_w_gate_lora_a = x_after_norm_2.mT @ (grad_gate @ w_gate_lora_b.T)
         grad_w_gate_lora_b = gate_lora_a.mT @ grad_gate
-        w_gate_dequant = F.dequantize_nf4(w_gate, w_gate_quant_state).to(grad_output.dtype).t()
+        w_gate_dequant = BF.dequantize_nf4(w_gate, w_gate_quant_state).to(grad_output.dtype).t()
         grad_norm_2 = grad_gate @ w_gate_dequant.T + grad_gate @ w_gate_lora_b.T @ w_gate_lora_a.T
         
         # up proj part
@@ -406,17 +436,19 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         # d L / d w_up_lora_b = y1_lora_a.T @ d L / d y1
         grad_w_up_lora_b = up_lora_a.mT @ grad_up
         # d L / d x1 = d L / d y1 @ w_up.T + d L / d y1 @ w_up_lora_b.T @ w_up_lora_a.T
-        w_up_dequant = F.dequantize_4bit(w_up, w_up_quant_state).to(grad_output.dtype).t()
+        w_up_dequant = BF.dequantize_nf4(w_up, w_up_quant_state).to(grad_output.dtype).t()
         grad_norm_2 += grad_up @ w_up_dequant.T + grad_up @ w_up_lora_b.T @ w_up_lora_a.T
         
         # layernorm & rmsnorm backward
         if ctx.norm_mode == "layernorm":
             grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = layernorm_backward(
-                grad_norm_2, x_2_res, norm_weight_2, norm_bias_2, mean_2, rstd_2 # TODO: other params
+                grad_norm_2, x_2_res, norm_weight_2, norm_bias_2, mean_2, rstd_2, # TODO: other params
+                True, 1e-10, ctx.num_warps, ctx.block_size
             )
         else:
             grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = rmsnorm_backward(
-                grad_norm_2, x_2_res, norm_weight_2, mean_2, rstd_2 # TODO: other params
+                grad_norm_2, x_2_res, norm_weight_2, mean_2, rstd_2, # TODO: other params
+                True, 1e-10, ctx.num_warps, ctx.block_size
             )
         
         # residual connection
@@ -425,7 +457,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         # o part
         grad_w_o_lora_a = o.mT @ (grad_x_before_norm_2 @ w_o_lora_b.T)
         grad_w_o_lora_b = o_lora_a.mT @ grad_x_before_norm_2
-        w_o_dequant = F.dequantize_nf4(w_o, w_o_quant_state).to(grad_x_before_norm_2.dtype).t()
+        w_o_dequant = BF.dequantize_nf4(w_o, w_o_quant_state).to(grad_x_before_norm_2.dtype).t()
         grad_o = grad_x_before_norm_2 @ w_o_dequant.T + grad_x_before_norm_2 @ w_o_lora_b.T @ w_o_lora_a.T
         
         # reshape
@@ -447,36 +479,42 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         grad_q = grad_s @ k
         
         # apply positional encoding
-        grad_q = rope_backward(grad_q, cos, sin) # TODO: other params
-        grad_k = rope_backward(grad_k, cos, sin)
+        if ctx.use_rotary_pos_enc:
+            grad_q = rope_backward(grad_q, cos, sin) # TODO: other params
+            grad_k = rope_backward(grad_k, cos, sin)
+        else:
+            grad_q = head_to_hidden_shape(grad_q)
+            grad_k = head_to_hidden_shape(grad_k)
         grad_v = head_to_hidden_shape(grad_v)
         
         # backward of q_proj
         grad_w_q_lora_a = x_after_norm_1.mT @ (grad_q @ w_q_lora_b.T)
         grad_w_q_lora_b = q_lora_a.mT @ grad_q
-        w_q_dequant = F.dequantize_nf4(w_q, w_q_quant_state).to(grad_output.dtype).t()
+        w_q_dequant = BF.dequantize_nf4(w_q, w_q_quant_state).to(grad_output.dtype).t()
         grad_norm_1 = grad_q @ w_q_dequant.T + grad_q @ w_q_lora_b.T @ w_q_lora_a.T
 
         # backward of k_proj
         grad_w_k_lora_a = x_after_norm_1.mT @ (grad_k @ w_k_lora_b.T)
         grad_w_k_lora_b = k_lora_a.mT @ grad_k
-        w_k_dequant = F.dequantize_nf4(w_k, w_k_quant_state).to(grad_output.dtype).t()
+        w_k_dequant = BF.dequantize_nf4(w_k, w_k_quant_state).to(grad_output.dtype).t()
         grad_norm_1 += grad_k @ w_k_dequant.T + grad_k @ w_k_lora_b.T @ w_k_lora_a.T
 
         # backward of v_proj
         grad_w_v_lora_a = x_after_norm_1.mT @ (grad_v @ w_v_lora_b.T)
         grad_w_v_lora_b = v_lora_a.mT @ grad_v
-        w_v_dequant = F.dequantize_nf4(w_v, w_v_quant_state).to(grad_output.dtype).t()
+        w_v_dequant = BF.dequantize_nf4(w_v, w_v_quant_state).to(grad_output.dtype).t()
         grad_norm_1 += grad_v @ w_v_dequant.T + grad_v @ w_v_lora_b.T @ w_v_lora_a.T
         
         # layernorm or rmsnorm backward
         if ctx.norm_mode == "layernorm":
             grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = layernorm_backward(
-                grad_norm_1, x_1_res, norm_weight_1, norm_bias_1, mean_1, rstd_1 # TODO: other params
+                grad_norm_1, x_1_res, norm_weight_1, norm_bias_1, mean_1, rstd_1, # TODO: other params
+                True, 1e-10, ctx.num_warps, ctx.block_size
             )
         else:
             grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = rmsnorm_backward(
-                grad_norm_1, x_1_res, norm_weight_1, mean_1, rstd_1 # TODO: other params
+                grad_norm_1, x_1_res, norm_weight_1, mean_1, rstd_1, # TODO: other params
+                True, 1e-10, ctx.num_warps, ctx.block_size
             )
             
         # residual connection
@@ -535,6 +573,6 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             None,
             grad_w_down_lora_a,
             grad_w_down_lora_b
-        ) + (None,) * 7
+        ) + (None,) * 8
         
         
