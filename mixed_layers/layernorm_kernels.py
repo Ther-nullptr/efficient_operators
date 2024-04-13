@@ -182,7 +182,7 @@ def layernorm_forward(x, weight, bias, eps):
         num_warps=num_warps,
     )
     y = y.contiguous()
-    return y, mean, rstd
+    return y, mean, rstd, BLOCK_SIZE, num_warps
 
 
 def layernorm_backward(
