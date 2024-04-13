@@ -170,7 +170,7 @@ def rmsnorm_forward(x, weight, eps):
     return y, mean, rstd
 
 
-def rms_backward(dy, x, w, m, v, needs_inputs_grad, eps, num_warps, BLOCK_SIZE):
+def rmsnorm_backward(dy, x, w, m, v, needs_inputs_grad, eps, num_warps, BLOCK_SIZE):
     dx, dw = None, None
     if needs_inputs_grad:
         # heuristics for amount of parallel reduction stream for DW/DB

@@ -112,9 +112,9 @@ class MixedSparseFullAttentionFunc(torch.autograd.Function):
         
         if small_value_approx:
             # save the main weight, then recompute when backward
-            q = (q_main)
-            k = (k_main)
-            v = (v_main)
+            q = q_main
+            k = k_main
+            v = v_main
         
         # prune all the values
         if iteration < 10:
