@@ -363,16 +363,16 @@ class MixedSparseSingleLayerFunc(torch.autograd.Function):
         grad_w_up_lora_b = up_lora_a.mT @ grad_up
         # d L / d x1 = d L / d y1 @ w_up.T + d L / d y1 @ w_up_lora_b.T @ w_up_lora_a.T
         w_up_dequant = F.dequantize_4bit(w_up, w_up_quant_state).to(grad_output.dtype).t()
-        grad_norm = grad_up @ w_up_dequant.T + grad_up @ w_up_lora_b.T @ w_up_lora_a.T
+        grad_norm_2 = grad_up @ w_up_dequant.T + grad_up @ w_up_lora_b.T @ w_up_lora_a.T
         
         # layernorm & rmsnorm backward
         if ctx.norm_mode == "layernorm":
             grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = layernorm_backward(
-                grad_norm, x_2_res, norm_weight_2, norm_bias_2, mean_2, rstd_2 # TODO: other params
+                grad_norm_2, x_2_res, norm_weight_2, norm_bias_2, mean_2, rstd_2 # TODO: other params
             )
         else:
             grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = rmsnorm_backward(
-                grad_norm, x_2_res, norm_weight_2, mean_2, rstd_2 # TODO: other params
+                grad_norm_2, x_2_res, norm_weight_2, mean_2, rstd_2 # TODO: other params
             )
         
         # residual connection
@@ -411,28 +411,28 @@ class MixedSparseSingleLayerFunc(torch.autograd.Function):
         grad_w_q_lora_a = x_after_norm_1.mT @ (grad_q @ w_q_lora_b.T)
         grad_w_q_lora_b = q_lora_a.mT @ grad_q
         w_q_dequant = F.dequantize_nf4(w_q, w_q_quant_state).to(grad_output.dtype).t()
-        grad_x = grad_q @ w_q_dequant.T + grad_q @ w_q_lora_b.T @ w_q_lora_a.T
+        grad_norm_1 = grad_q @ w_q_dequant.T + grad_q @ w_q_lora_b.T @ w_q_lora_a.T
 
         # backward of k_proj
         grad_w_k_lora_a = x_after_norm_1.mT @ (grad_k @ w_k_lora_b.T)
         grad_w_k_lora_b = k_lora_a.mT @ grad_k
         w_k_dequant = F.dequantize_nf4(w_k, w_k_quant_state).to(grad_output.dtype).t()
-        grad_x += grad_k @ w_k_dequant.T + grad_k @ w_k_lora_b.T @ w_k_lora_a.T
+        grad_norm_1 += grad_k @ w_k_dequant.T + grad_k @ w_k_lora_b.T @ w_k_lora_a.T
 
         # backward of v_proj
         grad_w_v_lora_a = x_after_norm_1.mT @ (grad_v @ w_v_lora_b.T)
         grad_w_v_lora_b = v_lora_a.mT @ grad_v
         w_v_dequant = F.dequantize_nf4(w_v, w_v_quant_state).to(grad_output.dtype).t()
-        grad_x += grad_v @ w_v_dequant.T + grad_v @ w_v_lora_b.T @ w_v_lora_a.T
+        grad_norm_1 += grad_v @ w_v_dequant.T + grad_v @ w_v_lora_b.T @ w_v_lora_a.T
         
         # layernorm or rmsnorm backward
         if ctx.norm_mode == "layernorm":
             grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = layernorm_backward(
-                grad_x, x_1_res, norm_weight_1, norm_bias_1, mean_1, rstd_1 # TODO: other params
+                grad_norm_1, x_1_res, norm_weight_1, norm_bias_1, mean_1, rstd_1 # TODO: other params
             )
         else:
             grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = rmsnorm_backward(
-                grad_x, x_1_res, norm_weight_1, mean_1, rstd_1 # TODO: other params
+                grad_norm_1, x_1_res, norm_weight_1, mean_1, rstd_1 # TODO: other params
             )
             
         # residual connection
