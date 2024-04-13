@@ -163,35 +163,37 @@ class MixedSparseSingleLayerFunc(torch.autograd.Function):
         
         # forward process: up_proj
         w_up_dequant = F.dequantize_4bit(w_up, w_up_quant_state).to(x_after_norm_2.dtype).t()
-        y1_main = x_after_norm_2 @ w_up_dequant + b_up if b_up is not None else x_after_norm_2 @ w_up_dequant
-        y1_lora_a = x_after_norm_2 @ w_up_lora_a
-        y1_lora = y1_lora_a @ w_up_lora_b
-        y1 = y1_main + y1_lora
+        up_main = x_after_norm_2 @ w_up_dequant + b_up if b_up is not None else x_after_norm_2 @ w_up_dequant
+        up_lora_a = x_after_norm_2 @ w_up_lora_a
+        up_lora = up_lora_a @ w_up_lora_b
+        up = up_main + up_lora
         
         # apply activation function
         if activation_forward == "relu":
-            x2 = torch.relu(y1)
+            fn = torch.relu(up)
         elif activation_forward == "silu":
-            x2 = torch.silu(y1)
+            fn = torch.silu(up)
         elif activation_forward == "gelu":
-            x2 = torch.gelu(y1)
+            fn = torch.gelu(up)
             
         # forward process: down_proj
-        w_down_dequant = F.dequantize_4bit(w_down, w_down_state).to(x1.dtype).t()
-        y2_main = (
-            x2 @ w_down_dequant + b_down if b_down is not None else x2 @ w_down_dequant
+        w_down_dequant = F.dequantize_4bit(w_down, w_down_state).to(fn.dtype).t()
+        down_main = (
+            fn @ w_down_dequant + b_down if b_down is not None else fn @ w_down_dequant
         )
-        y2_lora_a = x2 @ w_down_lora_a
-        y2_lora = y2_lora_a @ w_down_lora_b
-        y2 = y2_main + y2_lora
+        down_lora_a = fn @ w_down_lora_a
+        down_lora = down_lora_a @ w_down_lora_b
+        down = down_main + down_lora
         
         # residual connection
-        x_2_final = x_2_res + y2
+        x_2_final = x_2_res + down
         
         ctx.save_for_backward(
             ### activations (attention) ###
             x_1_res,
             x_after_norm_1,
+            mean_1,
+            rstd_1,
             q_lora_a,
             k_lora_a,
             v_lora_a,
@@ -206,10 +208,12 @@ class MixedSparseSingleLayerFunc(torch.autograd.Function):
             ### activations (mlp) ###
             x_2_res,
             x_after_norm_2,
-            y1,
-            y1_lora_a,
-            x2,
-            y2_lora_a,
+            mean_2,
+            rstd_2,
+            up, #! this part can be a raw mask
+            up_lora_a,
+            fn,
+            down_lora_a,
             ### weights (attention) ###
             norm_weight_1, 
             norm_bias_1,
@@ -246,9 +250,241 @@ class MixedSparseSingleLayerFunc(torch.autograd.Function):
             w_down_lora_a,
             w_down_lora_b,
         )
+        ctx.quant_state = (
+            w_q_quant_state,
+            w_k_quant_state,
+            w_v_quant_state,
+            w_o_quant_state,
+            w_up_quant_state,
+            w_down_state,
+        )
+        ctx.norm_mode = norm_mode
+        ctx.num_heads = num_heads
         
         return x_2_final
     
     @staticmethod
     def backward(ctx, grad_output):
-        pass
+        (
+            w_q_quant_state,
+            w_k_quant_state,
+            w_v_quant_state,
+            w_o_quant_state,
+            w_up_quant_state,
+            w_down_quant_state,
+        ) = ctx.quant_state
+        
+        (
+            ### activations (attention) ###
+            x_1_res,
+            x_after_norm_1,
+            mean_1,
+            rstd_1,
+            q_lora_a,
+            k_lora_a,
+            v_lora_a,
+            q,
+            k,
+            v,
+            a,
+            o,
+            o_lora_a,
+            cos,
+            sin,
+            ### activations (mlp) ###
+            x_2_res,
+            x_after_norm_2,
+            mean_2,
+            rstd_2,
+            up, #! this part can be a raw mask
+            up_lora_a,
+            fn,
+            down_lora_a,
+            ### weights (attention) ###
+            norm_weight_1, 
+            norm_bias_1,
+            w_q,
+            b_q,
+            w_q_lora_a,
+            w_q_lora_b,
+            #**********************
+            w_k,
+            b_k,
+            w_k_lora_a,
+            w_k_lora_b,
+            #**********************
+            w_v,
+            b_v,
+            w_v_lora_a,
+            w_v_lora_b,
+            #**********************
+            w_o,
+            b_o,
+            w_o_lora_a,
+            w_o_lora_b,
+            ### weights (mlp) ###
+            norm_weight_2,
+            norm_bias_2,
+            #**********************
+            w_up,
+            b_up,
+            w_up_lora_a,
+            w_up_lora_b,
+            #**********************
+            w_down,
+            b_down,
+            w_down_lora_a,
+            w_down_lora_b,
+        ) = ctx.saved_tensors
+        
+        # down proj part
+        # d L / d w_down_lora_a = x2.T @ d L / d y2 @ w_down_lora_b.T
+        grad_w_down_lora_a = fn.mT @ (grad_output @ w_down_lora_b.T)
+        # d L / d w_down_lora_b = y2_lora_a.T @ d L / d y2
+        grad_w_down_lora_b = down_lora_a.mT @ grad_output
+        # d L / d x2 = d L / d y2 @ w_down.T + d L / d y2 @ w_down_lora_b.T @ w_down_lora_a.T
+        w_down_dequant = (
+            F.dequantize_4bit(w_down, w_down_quant_state).to(grad_output.dtype).t()
+        )
+        grad_fn = (
+            grad_output @ w_down_dequant.T
+            + grad_output @ w_down_lora_b.T @ w_down_lora_a.T
+        )
+        
+        # TODO: activation backward
+        # activation part
+        grad_up = grad_fn.clone()
+        grad_up[up] = 0
+        
+        # up proj part
+        # d L / d w_up_lora_a = x1.T @ d L / d y1 @ w_up_lora_b.T
+        grad_w_up_lora_a = x_after_norm_2.mT @ (grad_up @ w_up_lora_b.T)
+        # d L / d w_up_lora_b = y1_lora_a.T @ d L / d y1
+        grad_w_up_lora_b = up_lora_a.mT @ grad_up
+        # d L / d x1 = d L / d y1 @ w_up.T + d L / d y1 @ w_up_lora_b.T @ w_up_lora_a.T
+        w_up_dequant = F.dequantize_4bit(w_up, w_up_quant_state).to(grad_output.dtype).t()
+        grad_norm = grad_up @ w_up_dequant.T + grad_up @ w_up_lora_b.T @ w_up_lora_a.T
+        
+        # layernorm & rmsnorm backward
+        if ctx.norm_mode == "layernorm":
+            grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = layernorm_backward(
+                grad_norm, x_2_res, norm_weight_2, norm_bias_2, mean_2, rstd_2 # TODO: other params
+            )
+        else:
+            grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = rmsnorm_backward(
+                grad_norm, x_2_res, norm_weight_2, mean_2, rstd_2 # TODO: other params
+            )
+        
+        # residual connection
+        grad_x_before_norm_2 += grad_output
+        
+        # o part
+        grad_w_o_lora_a = o.mT @ (grad_x_before_norm_2 @ w_o_lora_b.T)
+        grad_w_o_lora_b = o_lora_a.mT @ grad_x_before_norm_2
+        w_o_dequant = F.dequantize_nf4(w_o, w_o_quant_state).to(grad_x_before_norm_2.dtype).t()
+        grad_o = grad_x_before_norm_2 @ w_o_dequant.T + grad_x_before_norm_2 @ w_o_lora_b.T @ w_o_lora_a.T
+        
+        # reshape
+        grad_o = hidden_to_head_shape(grad_o, ctx.num_heads)
+        
+        # backward of second GEMM: O = A @ V
+        # d L / d V = A.T @ d L / d O
+        grad_v = a.transpose(-2, -1) @ grad_o
+        grad_a = grad_o @ v.transpose(-2, -1)
+
+        # backward of softmax
+        grad_s = (grad_a - (grad_a * a).sum(dim=-1, keepdims=True)) * a
+
+        # backward of first GEMM: S = Q @ K.T / sqrt(d_k)
+        grad_s = grad_s / math.sqrt(ctx.head_dim)
+        # d L / d K = (d L / d S)^T @ Q
+        grad_k = grad_s.transpose(-2, -1) @ q
+        # d L / d Q = d L / d S @ K
+        grad_q = grad_s @ k
+        
+        # apply positional encoding
+        grad_q = rope_backward(grad_q, cos, sin) # TODO: other params
+        grad_k = rope_backward(grad_k, cos, sin)
+        grad_v = head_to_hidden_shape(grad_v)
+        
+        # backward of q_proj
+        grad_w_q_lora_a = x_after_norm_1.mT @ (grad_q @ w_q_lora_b.T)
+        grad_w_q_lora_b = q_lora_a.mT @ grad_q
+        w_q_dequant = F.dequantize_nf4(w_q, w_q_quant_state).to(grad_output.dtype).t()
+        grad_x = grad_q @ w_q_dequant.T + grad_q @ w_q_lora_b.T @ w_q_lora_a.T
+
+        # backward of k_proj
+        grad_w_k_lora_a = x_after_norm_1.mT @ (grad_k @ w_k_lora_b.T)
+        grad_w_k_lora_b = k_lora_a.mT @ grad_k
+        w_k_dequant = F.dequantize_nf4(w_k, w_k_quant_state).to(grad_output.dtype).t()
+        grad_x += grad_k @ w_k_dequant.T + grad_k @ w_k_lora_b.T @ w_k_lora_a.T
+
+        # backward of v_proj
+        grad_w_v_lora_a = x_after_norm_1.mT @ (grad_v @ w_v_lora_b.T)
+        grad_w_v_lora_b = v_lora_a.mT @ grad_v
+        w_v_dequant = F.dequantize_nf4(w_v, w_v_quant_state).to(grad_output.dtype).t()
+        grad_x += grad_v @ w_v_dequant.T + grad_v @ w_v_lora_b.T @ w_v_lora_a.T
+        
+        # layernorm or rmsnorm backward
+        if ctx.norm_mode == "layernorm":
+            grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = layernorm_backward(
+                grad_x, x_1_res, norm_weight_1, norm_bias_1, mean_1, rstd_1 # TODO: other params
+            )
+        else:
+            grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = rmsnorm_backward(
+                grad_x, x_1_res, norm_weight_1, mean_1, rstd_1 # TODO: other params
+            )
+            
+        # residual connection
+        grad_x_before_norm_1 += grad_x_before_norm_2
+        
+        return (
+            grad_x_before_norm_1,
+            #############attention part#############
+            None,
+            None,
+            ####################################
+            None,
+            None,
+            ####################################
+            None,
+            None,
+            None,
+            grad_w_q_lora_a,
+            grad_w_q_lora_b,
+            ####################################
+            None,
+            None,
+            None,
+            grad_w_k_lora_a,
+            grad_w_k_lora_b,
+            ####################################
+            None,
+            None,
+            None,
+            grad_w_v_lora_a,
+            grad_w_v_lora_b,
+            ####################################
+            None,
+            None,
+            None,
+            grad_w_o_lora_a,
+            grad_w_o_lora_b,
+            ####################################
+            None,
+            None,
+            ####################################
+            None,
+            None,
+            None,
+            grad_w_up_lora_a,
+            grad_w_up_lora_b,
+            ####################################
+            None,
+            None,
+            None,
+            grad_w_down_lora_a,
+            grad_w_down_lora_b
+        ) + (None,) * 7
+        
+        
