@@ -171,6 +171,8 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         # apply activation function
         if activation_forward == "relu":
             fn = torch.relu(up)
+            # TODO: now only support relu, generate mask
+            up = up < 0 # now up is a mask
         elif activation_forward == "silu":
             fn = torch.silu(up)
         elif activation_forward == "gelu":
@@ -260,6 +262,7 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         )
         ctx.norm_mode = norm_mode
         ctx.num_heads = num_heads
+        ctx.use_rotary_pos_enc = use_rotary_pos_enc
         
         return x_2_final
     
@@ -403,8 +406,12 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         grad_q = grad_s @ k
         
         # apply positional encoding
-        grad_q = rope_backward(grad_q, cos, sin) # TODO: other params
-        grad_k = rope_backward(grad_k, cos, sin)
+        if ctx.use_rotary_pos_enc:
+            grad_q = rope_backward(grad_q, cos, sin) # TODO: other params
+            grad_k = rope_backward(grad_k, cos, sin)
+        else:
+            grad_q = head_to_hidden_shape(grad_q)
+            grad_k = head_to_hidden_shape(grad_k)
         grad_v = head_to_hidden_shape(grad_v)
         
         # backward of q_proj
