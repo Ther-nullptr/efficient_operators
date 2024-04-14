@@ -167,7 +167,7 @@ def rmsnorm_forward(x, weight, eps):
         num_warps=num_warps,
     )
     y = y.contiguous()
-    return y, mean, rstd
+    return y, mean, rstd, BLOCK_SIZE, num_warps
 
 
 def rmsnorm_backward(dy, x, w, m, v, needs_inputs_grad, eps, num_warps, BLOCK_SIZE):

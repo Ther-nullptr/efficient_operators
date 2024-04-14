@@ -29,6 +29,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         ####################################
         cos: torch.Tensor,
         sin: torch.Tensor,
+        position_ids: torch.Tensor,
         ####################################
         w_q: torch.Tensor,
         b_q: torch.Tensor,
@@ -84,6 +85,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         activation_forward: str,
         activation_backward: str,
     ):
+        # todo: now the shape of x is [bsz, seq_len, hidden_dim]
         x = x.to(torch.bfloat16)
         x_1_res = x # keep the original input for residual connection
         
@@ -103,7 +105,8 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         w_down_lora_a = w_down_lora_a.to(torch.bfloat16)
         w_down_lora_b = w_down_lora_b.to(torch.bfloat16)
         
-        b_q, b_k, b_v, b_o, b_gate, b_up, b_down = b_q.to(torch.bfloat16), b_k.to(torch.bfloat16), b_v.to(torch.bfloat16), b_o.to(torch.bfloat16), b_gate.to(torch.bfloat16), b_up.to(torch.bfloat16), b_down.to(torch.bfloat16)
+        if b_q is not None:
+            b_q, b_k, b_v, b_o, b_gate, b_up, b_down = b_q.to(torch.bfloat16), b_k.to(torch.bfloat16), b_v.to(torch.bfloat16), b_o.to(torch.bfloat16), b_gate.to(torch.bfloat16), b_up.to(torch.bfloat16), b_down.to(torch.bfloat16)
         
         # layernorm or rmsnorm
         if norm_mode == "layernorm":
@@ -142,8 +145,8 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         
         # TODO: apply positional encoding
         if use_rotary_pos_enc:
-            q = rope_forward(q, cos, sin)
-            k = rope_forward(k, cos, sin)
+            q = rope_forward(q, cos, sin, position_ids)
+            k = rope_forward(k, cos, sin, position_ids)
             
         # q,k,v: [bsz, num_heads, q_len, head_dim]
         # notice forward process no need to drop heads
@@ -219,7 +222,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         down_main = (
             hadamard @ w_down_dequant + b_down if b_down is not None else hadamard @ w_down_dequant
         )
-        down_lora_a = down_main @ w_down_lora_a
+        down_lora_a = hadamard @ w_down_lora_a
         down_lora = down_lora_a @ w_down_lora_b
         down = down_main + down_lora
         
@@ -313,7 +316,6 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         ctx.head_dim = head_dim
         
         x_2_final = x_2_final.to(torch.float32) #! for lm head
-        
         return x_2_final
     
     @staticmethod
@@ -441,12 +443,12 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         
         # layernorm & rmsnorm backward
         if ctx.norm_mode == "layernorm":
-            grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = layernorm_backward(
+            grad_x_before_norm_2, grad_norm_weight_2 = layernorm_backward(
                 grad_norm_2, x_2_res, norm_weight_2, norm_bias_2, mean_2, rstd_2, # TODO: other params
                 True, 1e-10, ctx.num_warps, ctx.block_size
             )
         else:
-            grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = rmsnorm_backward(
+            grad_x_before_norm_2, grad_norm_weight_2 = rmsnorm_backward(
                 grad_norm_2, x_2_res, norm_weight_2, mean_2, rstd_2, # TODO: other params
                 True, 1e-10, ctx.num_warps, ctx.block_size
             )
@@ -482,9 +484,9 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         if ctx.use_rotary_pos_enc:
             grad_q = rope_backward(grad_q, cos, sin) # TODO: other params
             grad_k = rope_backward(grad_k, cos, sin)
-        else:
-            grad_q = head_to_hidden_shape(grad_q)
-            grad_k = head_to_hidden_shape(grad_k)
+ 
+        grad_q = head_to_hidden_shape(grad_q)
+        grad_k = head_to_hidden_shape(grad_k)
         grad_v = head_to_hidden_shape(grad_v)
         
         # backward of q_proj
@@ -507,12 +509,12 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         
         # layernorm or rmsnorm backward
         if ctx.norm_mode == "layernorm":
-            grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = layernorm_backward(
+            grad_x_before_norm_1, grad_norm_weight_1 = layernorm_backward(
                 grad_norm_1, x_1_res, norm_weight_1, norm_bias_1, mean_1, rstd_1, # TODO: other params
                 True, 1e-10, ctx.num_warps, ctx.block_size
             )
         else:
-            grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = rmsnorm_backward(
+            grad_x_before_norm_1, grad_norm_weight_1 = rmsnorm_backward(
                 grad_norm_1, x_1_res, norm_weight_1, mean_1, rstd_1, # TODO: other params
                 True, 1e-10, ctx.num_warps, ctx.block_size
             )
@@ -526,6 +528,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             None,
             None,
             ####################################
+            None,
             None,
             None,
             ####################################
@@ -574,5 +577,127 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             grad_w_down_lora_a,
             grad_w_down_lora_b
         ) + (None,) * 8
+
+
+class MixedSparseSingleLayerWithGate(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+    ):
+        super(MixedSparseSingleLayerWithGate, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.iteration = 0
+        self.static_value = None
         
+    def forward(
+        self,
+        input: torch.Tensor,
+        norm_weight_1: torch.Tensor,
+        norm_bias_1: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        position_ids: torch.Tensor,
+        ############################################
+        q_proj_base: bnb.nn.modules.Linear4bit,
+        q_proj_lora_a: torch.nn.Linear,
+        q_proj_lora_b: torch.nn.Linear,
+        k_proj_base: bnb.nn.modules.Linear4bit,
+        k_proj_lora_a: torch.nn.Linear,
+        k_proj_lora_b: torch.nn.Linear,
+        v_proj_base: bnb.nn.modules.Linear4bit,
+        v_proj_lora_a: torch.nn.Linear,
+        v_proj_lora_b: torch.nn.Linear,
+        o_proj_base: bnb.nn.modules.Linear4bit,
+        o_proj_lora_a: torch.nn.Linear,
+        o_proj_lora_b: torch.nn.Linear,
+        ############################################
+        norm_weight_2: torch.Tensor,
+        norm_bias_2: torch.Tensor,
+        gate_proj_base: bnb.nn.modules.Linear4bit,
+        gate_proj_lora_a: torch.nn.Linear,
+        gate_proj_lora_b: torch.nn.Linear,
+        up_proj_base: bnb.nn.modules.Linear4bit,
+        up_proj_lora_a: torch.nn.Linear,
+        up_proj_lora_b: torch.nn.Linear,
+        down_proj_base: bnb.nn.modules.Linear4bit,
+        down_proj_lora_a: torch.nn.Linear,
+        down_proj_lora_b: torch.nn.Linear,
+        ############################################
+        attention_mask: torch.Tensor,
+        norm_mode: str,
+        num_heads: int,
+        head_dim: int,
+        use_rotary_pos_enc: bool,
+        small_value_approx: bool,
+        activation_forward: str,
+        activation_backward: str,
+    ):
+        y = MixedSparseSingleLayerWithGateFunc.apply(
+            input,
+            #############attention part#############
+            norm_weight_1,
+            norm_bias_1,
+            ####################################
+            cos,
+            sin,
+            position_ids,
+            ####################################
+            q_proj_base.weight,
+            q_proj_base.bias,
+            q_proj_base.weight.quant_state,
+            q_proj_lora_a.default.weight.T,
+            q_proj_lora_b.default.weight.T,
+            ####################################
+            k_proj_base.weight,
+            k_proj_base.bias,
+            k_proj_base.weight.quant_state,
+            k_proj_lora_a.default.weight.T,
+            k_proj_lora_b.default.weight.T,
+            ####################################
+            v_proj_base.weight,
+            v_proj_base.bias,
+            v_proj_base.weight.quant_state,
+            v_proj_lora_a.default.weight.T,
+            v_proj_lora_b.default.weight.T,
+            ####################################
+            o_proj_base.weight,
+            o_proj_base.bias,
+            o_proj_base.weight.quant_state,
+            o_proj_lora_a.default.weight.T,
+            o_proj_lora_b.default.weight.T,
+            #############mlp part#############
+            norm_weight_2,
+            norm_bias_2,
+            ####################################
+            gate_proj_base.weight,
+            gate_proj_base.bias,
+            gate_proj_base.weight.quant_state,
+            gate_proj_lora_a.default.weight.T,
+            gate_proj_lora_b.default.weight.T,
+            ####################################
+            up_proj_base.weight,
+            up_proj_base.bias,
+            up_proj_base.weight.quant_state,
+            up_proj_lora_a.default.weight.T,
+            up_proj_lora_b.default.weight.T,
+            ####################################
+            down_proj_base.weight,
+            down_proj_base.bias,
+            down_proj_base.weight.quant_state,
+            down_proj_lora_a.default.weight.T,
+            down_proj_lora_b.default.weight.T,
+            ####################################
+            attention_mask,
+            norm_mode,
+            num_heads,
+            head_dim,
+            use_rotary_pos_enc,
+            small_value_approx,
+            activation_forward,
+            activation_backward,
+        )
+        
+        return y
         
