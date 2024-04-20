@@ -25,14 +25,24 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
         quantization_shape,
         attn_first,
         prune_ratio,
+        use_8bit,
         iteration,
         static_value1,
         static_value2,
     ):
-        result = x1 @ x2
+        if use_8bit:
+            s1 = x1.abs().max()
+            s2 = x2.abs().max()
+            x1 = torch.round(x1 / s1 * 127)
+            x2 = torch.round(x2 / s2 * 127)
+            result = x1 @ x2 / 127 / 127 * s1 * s2
+            ctx.scale = (s1, s2)
+        else:
+            result = x1 @ x2
         ctx.needs_inputs_grad = [x1.requires_grad, x2.requires_grad]
         ctx.compress_type = compress_type
         ctx.quantization_shape = quantization_shape
+        ctx.use_8bit = use_8bit
         
         kth_val_1 = torch.tensor(0.0, device=x1.device)
         kth_val_2 = torch.tensor(0.0, device=x2.device)
@@ -113,28 +123,37 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
         quantization_shape = ctx.quantization_shape
         grad_input1, grad_input2 = None, None
 
-        if ctx.needs_inputs_grad[0] or ctx.needs_inputs_grad[1]:
-            if ctx.compress_type == "NF4":
-                x1 = F.dequantize_nf4(x1, ctx.quant_state[0])
-                x2 = F.dequantize_nf4(x2, ctx.quant_state[1])
-            elif ctx.compress_type != "NONE" and ctx.compress_type != "PRUNE_ROW":
-                quant_state1, quant_state2 = ctx.quant_state
-                input_shape1, input_shape2 = ctx.input_shape
-                x1 = per_block_dequantization(
-                    x1, input_shape1, quant_state1, quantization_shape
-                )
-                x2 = per_block_dequantization(
-                    x2, input_shape2, quant_state2, quantization_shape
-                )
+        if ctx.compress_type == "NF4":
+            x1 = F.dequantize_nf4(x1, ctx.quant_state[0])
+            x2 = F.dequantize_nf4(x2, ctx.quant_state[1])
+        elif ctx.compress_type != "NONE" and ctx.compress_type != "PRUNE_ROW":
+            quant_state1, quant_state2 = ctx.quant_state
+            input_shape1, input_shape2 = ctx.input_shape
+            x1 = per_block_dequantization(
+                x1, input_shape1, quant_state1, quantization_shape
+            )
+            x2 = per_block_dequantization(
+                x2, input_shape2, quant_state2, quantization_shape
+            )
 
-            if ctx.needs_inputs_grad[0]:
-                grad_input1 = grad_output @ x2.transpose(-2, -1)
-            if ctx.needs_inputs_grad[1]:
-                grad_input2 = x1.transpose(-2, -1) @ grad_output
+        if ctx.use_8bit:
+            s1, s2 = ctx.scale
+            sg = grad_output.abs().max()
+            grad_output = torch.round(grad_output / sg * 127)
+            x1 = torch.round(x1 / s1 * 127)
+            x2 = torch.round(x2 / s2 * 127)
+            grad_input1 = grad_output @ x2.transpose(-2, -1)
+            grad_input2 = x1.transpose(-2, -1) @ grad_output
+            grad_input1 = grad_input1 / 127 / 127 * s1 * sg
+            grad_input2 = grad_input2 / 127 / 127 * sg * s2
+        else:
+            grad_input1 = grad_output @ x2.transpose(-2, -1)
+            grad_input2 = x1.transpose(-2, -1) @ grad_output
 
         return (
             grad_input1,
             grad_input2,
+            None,
             None,
             None,
             None,
@@ -155,6 +174,7 @@ class EfficientMemoryGEMM(torch.nn.Module):
         quantization_shape: int = 64,
         attn_first: bool = False,
         prune_ratio: float = 0.90,
+        use_8bit: bool = False,
     ):
         super().__init__()
         self.compress_type = compress_type
@@ -164,6 +184,7 @@ class EfficientMemoryGEMM(torch.nn.Module):
         self.quantization_shape = quantization_shape
         self.attn_first = attn_first
         self.prune_ratio = prune_ratio
+        self.use_8bit = use_8bit
         self.iteration = 0
         self.static_value1 = None
         self.static_value2 = None
@@ -182,6 +203,7 @@ class EfficientMemoryGEMM(torch.nn.Module):
             self.quantization_shape,
             self.attn_first,
             self.prune_ratio,
+            self.use_8bit,
             self.iteration,
             self.static_value1,
             self.static_value2,

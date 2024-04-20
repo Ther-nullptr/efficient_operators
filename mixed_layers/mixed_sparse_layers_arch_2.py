@@ -133,24 +133,24 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         # TODO: now the shape of x is [bsz, seq_len, hidden_dim]
         x_1_res = x # keep the original input for residual connection
         
-        # TODO: fix this... covert all the lora weights & bias to float32
-        w_q_lora_a = w_q_lora_a.to(torch.float32)
-        w_q_lora_b = w_q_lora_b.to(torch.float32)
-        w_k_lora_a = w_k_lora_a.to(torch.float32)
-        w_k_lora_b = w_k_lora_b.to(torch.float32)
-        w_v_lora_a = w_v_lora_a.to(torch.float32)
-        w_v_lora_b = w_v_lora_b.to(torch.float32)
-        w_o_lora_a = w_o_lora_a.to(torch.float32)
-        w_o_lora_b = w_o_lora_b.to(torch.float32)
-        w_gate_lora_a = w_gate_lora_a.to(torch.float32)
-        w_gate_lora_b = w_gate_lora_b.to(torch.float32)
-        w_up_lora_a = w_up_lora_a.to(torch.float32)
-        w_up_lora_b = w_up_lora_b.to(torch.float32)
-        w_down_lora_a = w_down_lora_a.to(torch.float32)
-        w_down_lora_b = w_down_lora_b.to(torch.float32)
+        # TODO: fix this... covert all the lora weights & bias to bfloat16
+        w_q_lora_a = w_q_lora_a.to(torch.bfloat16)
+        w_q_lora_b = w_q_lora_b.to(torch.bfloat16)
+        w_k_lora_a = w_k_lora_a.to(torch.bfloat16)
+        w_k_lora_b = w_k_lora_b.to(torch.bfloat16)
+        w_v_lora_a = w_v_lora_a.to(torch.bfloat16)
+        w_v_lora_b = w_v_lora_b.to(torch.bfloat16)
+        w_o_lora_a = w_o_lora_a.to(torch.bfloat16)
+        w_o_lora_b = w_o_lora_b.to(torch.bfloat16)
+        w_gate_lora_a = w_gate_lora_a.to(torch.bfloat16)
+        w_gate_lora_b = w_gate_lora_b.to(torch.bfloat16)
+        w_up_lora_a = w_up_lora_a.to(torch.bfloat16)
+        w_up_lora_b = w_up_lora_b.to(torch.bfloat16)
+        w_down_lora_a = w_down_lora_a.to(torch.bfloat16)
+        w_down_lora_b = w_down_lora_b.to(torch.bfloat16)
         
         if b_q is not None:
-            b_q, b_k, b_v, b_o, b_gate, b_up, b_down = b_q.to(torch.float32), b_k.to(torch.float32), b_v.to(torch.float32), b_o.to(torch.float32), b_gate.to(torch.float32), b_up.to(torch.float32), b_down.to(torch.float32)
+            b_q, b_k, b_v, b_o, b_gate, b_up, b_down = b_q.to(torch.bfloat16), b_k.to(torch.bfloat16), b_v.to(torch.bfloat16), b_o.to(torch.bfloat16), b_gate.to(torch.bfloat16), b_up.to(torch.bfloat16), b_down.to(torch.bfloat16)
         
         # layernorm or rmsnorm
         if norm_mode == "layernorm":
@@ -180,7 +180,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             q = rope_forward(q, cos, sin, position_ids)
             k = rope_forward(k, cos, sin, position_ids)
             
-        q, k, v = q.to(torch.float32), k.to(torch.float32), v.to(torch.float32)
+        q, k, v = q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16)
             
         # q,k,v: [bsz, num_heads, q_len, head_dim]
         # notice forward process no need to drop heads
@@ -197,7 +197,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             s = s + attention_mask
 
         # forward: softmax
-        a = torch.softmax(s, dim=-1).to(torch.float32)  # [bsz, num_heads, q_len, q_len]
+        a = torch.softmax(s, dim=-1).to(torch.bfloat16)  # [bsz, num_heads, q_len, q_len]
 
         # forward: O = A @ V
         o = a @ v
@@ -253,13 +253,13 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
 
         # apply activation function (for gate)
         if activation_forward == "relu":
-            fn = torch.relu(gate).to(torch.float32)
+            fn = torch.relu(gate).to(torch.bfloat16)
             # TODO: now only support relu, generate mask
             gate = gate > 0 # now up is a mask
         elif activation_forward == "silu":
-            fn = gate * torch.sigmoid(gate).to(torch.float32)
+            fn = gate * torch.sigmoid(gate).to(torch.bfloat16)
         elif activation_forward == "gelu":
-            fn = torch.gelu(gate).to(torch.float32)
+            fn = torch.gelu(gate).to(torch.bfloat16)
             gate = gate > 0
             
         # hadamard
@@ -300,8 +300,8 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         
         ctx.save_for_backward(
             ### activations (attention) ###
-            x_1_res.to(torch.float32),
-            x_after_norm_1.to(torch.float32),
+            x_1_res.to(torch.bfloat16),
+            x_after_norm_1.to(torch.bfloat16),
             mean_1,
             rstd_1,
             q_lora_a,
@@ -316,13 +316,13 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             cos,
             sin,
             ### activations (mlp) ###
-            x_2_res.to(torch.float32),
-            x_after_norm_2.to(torch.float32),
+            x_2_res.to(torch.bfloat16),
+            x_after_norm_2.to(torch.bfloat16),
             mean_2,
             rstd_2,
             gate, #! this part can be a raw mask
-            up.to(torch.float32),
-            fn.to(torch.float32),
+            up.to(torch.bfloat16),
+            fn.to(torch.bfloat16),
             hadamard,
             gate_lora_a,
             up_lora_a,
@@ -389,7 +389,7 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         ctx.activation_backward = activation_backward
         ctx.shrink_head_ratio = shrink_head_ratio
         
-        x_2_final = x_2_final.to(torch.float32) #! for lm head
+        x_2_final = x_2_final.to(torch.bfloat16) #! for lm head
         return x_2_final, new_static_value
     
     @staticmethod
@@ -475,12 +475,12 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
             w_down_lora_b,
         ) = ctx.saved_tensors
         
-        grad_output = grad_output.to(torch.float32)
+        grad_output = grad_output.to(torch.bfloat16)
         
         if ctx.small_value_approx:
-            up = (up + up_lora_a @ w_up_lora_b).to(torch.float32)
-            fn = (fn + (gate_lora_a @ w_gate_lora_b) * gate).to(torch.float32)
-            x_2_res = (x_2_res + o_lora_a @ w_o_lora_b).to(torch.float32)
+            up = (up + up_lora_a @ w_up_lora_b).to(torch.bfloat16)
+            fn = (fn + (gate_lora_a @ w_gate_lora_b) * gate).to(torch.bfloat16)
+            x_2_res = (x_2_res + o_lora_a @ w_o_lora_b).to(torch.bfloat16)
         
         # down proj part
         grad_w_down_lora_a, grad_w_down_lora_b, grad_hadamard = lora_backward(w_down, w_down_quant_state, w_down_lora_a, w_down_lora_b, hadamard, down_lora_a, grad_output, ctx.iteration)
@@ -526,12 +526,12 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         
         # reshape
         grad_o = hidden_to_head_shape(grad_o, ctx.num_heads)
-        grad_o = grad_o.to(torch.float32)
+        grad_o = grad_o.to(torch.bfloat16)
         
         if ctx.small_value_approx:
-            q = (q + q_lora_a @ w_q_lora_b).to(torch.float32)
-            k = (k + k_lora_a @ w_k_lora_b).to(torch.float32)
-            v = (v + v_lora_a @ w_v_lora_b).to(torch.float32)
+            q = (q + q_lora_a @ w_q_lora_b).to(torch.bfloat16)
+            k = (k + k_lora_a @ w_k_lora_b).to(torch.bfloat16)
+            v = (v + v_lora_a @ w_v_lora_b).to(torch.bfloat16)
             q = hidden_to_head_shape(q, ctx.num_heads)
             k = hidden_to_head_shape(k, ctx.num_heads)
             v = hidden_to_head_shape(v, ctx.num_heads)
