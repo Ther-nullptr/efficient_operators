@@ -11,6 +11,12 @@ from gact.memory_efficient_function import (
     naive_adjustment,
 )
 
+num_heads, head_dim = 32, 128
+def _shape(tensor: torch.Tensor, seq_len: int, bsz: int):
+    # (bsz, seq_len, hidden_dim) -> (bsz, num_heads, seq_len, head_dim) -> (bsz * num_heads, seq_len, head_dim)
+    tensor = tensor.view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+    tensor = tensor.reshape(-1, *tensor.shape[2:]).contiguous()
+    return tensor
 
 class EfficientMemoryHadamardFunc(torch.autograd.Function):
     @staticmethod
@@ -175,4 +181,132 @@ class EfficientMemoryHadamard(torch.nn.Module):
         )
         self.iteration += 1
 
+        return result
+    
+    
+class EfficientMemoryHadamardFuseLoRAFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x1,
+        x2,
+        mask,
+        x1_lora_a,
+        x2_lora_a,
+        w1_lora_b,
+        w2_lora_b,
+        compress_type,
+        prune_ratio,
+        iteration,
+        static_value1,
+        static_value2,
+        batch_size
+    ):
+        # forward: use the original GEMM
+        result = x1 * x2
+        #! just for simulation; in fact, we save x_main directly
+        res1 = (x1_lora_a @ w1_lora_b) * mask
+        res2 = (x2_lora_a @ w2_lora_b)
+        x1_main = x1 # - res1
+        x2_main = x2 - res2
+
+        # prune the x1_main & x2_main
+        kth_val_1 = torch.tensor(0.0, device=x1.device)
+        kth_val_2 = torch.tensor(0.0, device=x2.device)
+        
+        if compress_type == "PRUNE_ROW":
+            if iteration < 10:
+                kth_val_1 = torch.kthvalue(
+                    x1_main.flatten(), int(x1_main.numel() * prune_ratio)
+                ).values
+                kth_val_2 = torch.kthvalue(
+                    x2_main.flatten(), int(x2_main.numel() * prune_ratio)
+                ).values
+            else:
+                kth_val_1, kth_val_2 = static_value1, static_value2
+            mask_1 = x1_main.abs() > kth_val_1
+            x1_main = x1_main * mask_1
+            mask_2 = x2_main.abs() > kth_val_2
+            x2_main = x2_main * mask_2
+
+        ctx.mark_non_differentiable(kth_val_1, kth_val_2)
+        ctx.save_for_backward(
+            x1_main, x2_main, mask, x1_lora_a, x2_lora_a, w1_lora_b, w2_lora_b
+        )
+        ctx.batch_size = batch_size
+        return result, kth_val_1, kth_val_2
+
+    @staticmethod
+    def backward(ctx, grad_out, grad_kth_val_1, grad_kth_val_2):
+        # reconstruct the original x1, x2
+        x1_main, x2_main, mask, x1_lora_a, x2_lora_a, w1_lora_b, w2_lora_b = ctx.saved_tensors
+        
+        res1 = (x1_lora_a @ w1_lora_b) * mask
+        res2 = (x2_lora_a @ w2_lora_b)
+        x1 = x1_main # + res1
+        x2 = x2_main + res2
+        grad_input1 = grad_out * x2
+        grad_input2 = grad_out * x1
+
+        return (
+            grad_input1,
+            grad_input2,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None
+        )
+
+
+class EfficientMemoryHadamardFuseLoRA(torch.nn.Module):
+    def __init__(
+        self,
+        compress_type: str = "PRUNE_ROW",
+        prune_ratio: float = 0.90,
+    ):
+        super().__init__()
+        self.compress_type = compress_type
+        self.prune_ratio = prune_ratio
+        self.iteration = 0
+        self.static_value1 = None
+        self.static_value2 = None
+        
+    def forward(self, x1, x2, mask, x1_lora_a, x2_lora_a, w1_lora_b, w2_lora_b, batch_size):
+        result, static_value1, static_value2 = EfficientMemoryHadamardFuseLoRAFunc.apply(
+            x1,
+            x2,
+            mask,
+            x1_lora_a,
+            x2_lora_a,
+            w1_lora_b,
+            w2_lora_b,
+            self.compress_type,
+            self.prune_ratio,
+            self.iteration,
+            self.static_value1,
+            self.static_value2,
+            batch_size
+        )
+        
+        self.static_value1 = (
+            static_value1
+            if self.static_value1 is None
+            else (self.iteration * self.static_value1 + static_value1)
+            / (self.iteration + 1)
+        )
+        self.static_value2 = (
+            static_value2
+            if self.static_value2 is None
+            else (self.iteration * self.static_value2 + static_value2)
+            / (self.iteration + 1)
+        )
+        self.iteration += 1
+        
         return result

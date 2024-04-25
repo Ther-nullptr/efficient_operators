@@ -28,6 +28,7 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
         prune_ratio,
         iteration,
         static_value,
+        gradient_mask,
     ):
         # print(x.shape, w.shape)
         if use_bias:
@@ -83,6 +84,7 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
 
         # if the compress type is not JPEG or DCT, then the input will not be compressed(do nothing)
         ctx.save_for_backward(x, w)
+        ctx.gradient_mask = gradient_mask
         
         if kth_val is None:
             kth_val = torch.tensor(0.0)
@@ -109,11 +111,12 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
             x = per_block_dequantization(x, input_shape, quant_state)
 
         grad_input = grad_weight = grad_bias = None
-        if ctx.needs_inputs_grad[0]:
-            grad_input = grad_output @ w
-        if ctx.needs_inputs_grad[1]:
-            grad_weight = grad_output.transpose(-2, -1) @ x
-        if use_bias and ctx.needs_inputs_grad[2]:
+        grad_input = grad_output @ w
+        grad_weight = grad_output.transpose(-2, -1) @ x
+        if ctx.gradient_mask:
+            grad_mask = torch.cat([torch.ones_like(grad_weight)[...,:grad_weight.shape[-1]//2], torch.zeros_like(grad_weight)[...,:grad_weight.shape[-1]//2]], dim=-1)
+            grad_weight *= grad_mask
+        if use_bias:
             grad_bias = grad_output.sum(0)
 
         return (
@@ -127,6 +130,7 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
             None,
             None,
             None,
+            None
         )
 
 
@@ -139,6 +143,7 @@ class EfficientMemoryLinear(torch.nn.Linear):
         compress_type: str = "JPEG",
         compress_quality: int = 50,
         prune_ratio: float = 0.9,
+        gradient_mask: bool = False,
     ):
         super().__init__(in_features, out_features, bias)
         self.compress_type = compress_type
@@ -147,6 +152,7 @@ class EfficientMemoryLinear(torch.nn.Linear):
         self.dct_processor = DCTProcessor(quality=compress_quality)
         self.prune_ratio = prune_ratio
         self.iteration = 0
+        self.gradient_mask = gradient_mask
         self.static_value = None
 
     def forward(self, input: torch.Tensor):
@@ -164,6 +170,7 @@ class EfficientMemoryLinear(torch.nn.Linear):
             self.prune_ratio,
             self.iteration,
             self.static_value,
+            self.gradient_mask,
         )
 
         self.static_value = (
@@ -175,3 +182,31 @@ class EfficientMemoryLinear(torch.nn.Linear):
         self.iteration += 1
 
         return result
+
+class EfficientMaskedLinearFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, w, gradient_mask=False):
+        output = x @ w.transpose(0, 1)
+        ctx.save_for_backward(x, w)
+        ctx.gradient_mask = gradient_mask
+        return output
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, w = ctx.saved_tensors
+        grad_x = grad_output @ w
+        grad_w = grad_output.transpose(-2, -1) @ x
+        # mask the grad_w to 0
+        if ctx.gradient_mask:
+            grad_mask = torch.cat([torch.ones_like(grad_w)[...,:grad_w.shape[-1]//2], torch.zeros_like(grad_w)[...,:grad_w.shape[-1]//2]], dim=-1)
+            grad_w *= grad_mask
+        return grad_x, grad_w, None
+    
+    
+class EfficientMaskedLinear(torch.nn.Linear):
+    def __init__(self, in_features, out_features, bias=False, gradient_mask=False):
+        super(EfficientMaskedLinear, self).__init__(in_features, out_features, bias)
+        self.gradient_mask = gradient_mask
+        
+    def forward(self, x):
+        return EfficientMaskedLinearFunc.apply(x, self.weight, self.gradient_mask)
