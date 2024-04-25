@@ -47,7 +47,7 @@ def _seeded_dropout_backward(
     random = tl.rand(seed, offsets)
     grad_out_keep = random > p
     # write-back
-    grad_in = tl.where(grad_out_keep, grad_out, 0.0)
+    grad_in = tl.where(grad_out_keep, grad_out / (1 - p), 0.0)
     tl.store(grad_in_ptr + offsets, grad_in, mask=mask)
     
     
@@ -56,7 +56,7 @@ def dropout_forward(x, p, seed):
     assert x.is_contiguous()
     n_elements = x.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-    _seeded_dropout[grid](x, output, n_elements, p, seed + 2, BLOCK_SIZE=1024)
+    _seeded_dropout[grid](x, output, n_elements, p, seed + 114, BLOCK_SIZE=1024)
     return output
 
 
@@ -66,6 +66,6 @@ def dropout_backward(grad_out, p, seed):
     n_elements = grad_out.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
     _seeded_dropout_backward[grid](
-        grad_out, grad_in, n_elements, p, seed + 2, BLOCK_SIZE=1024
+        grad_out, grad_in, n_elements, p, seed + 114, BLOCK_SIZE=1024
     )
     return grad_in
