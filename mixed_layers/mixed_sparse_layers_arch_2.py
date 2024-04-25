@@ -130,33 +130,16 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         #########################################
         training: bool
     ):
-        # TODO: now the shape of x is [bsz, seq_len, hidden_dim]
         x_1_res = x # keep the original input for residual connection
-        
-        # TODO: fix this... covert all the lora weights & bias to float32
-        w_q_lora_a = w_q_lora_a.to(torch.float32)
-        w_q_lora_b = w_q_lora_b.to(torch.float32)
-        w_k_lora_a = w_k_lora_a.to(torch.float32)
-        w_k_lora_b = w_k_lora_b.to(torch.float32)
-        w_v_lora_a = w_v_lora_a.to(torch.float32)
-        w_v_lora_b = w_v_lora_b.to(torch.float32)
-        w_o_lora_a = w_o_lora_a.to(torch.float32)
-        w_o_lora_b = w_o_lora_b.to(torch.float32)
-        w_gate_lora_a = w_gate_lora_a.to(torch.float32)
-        w_gate_lora_b = w_gate_lora_b.to(torch.float32)
-        w_up_lora_a = w_up_lora_a.to(torch.float32)
-        w_up_lora_b = w_up_lora_b.to(torch.float32)
-        w_down_lora_a = w_down_lora_a.to(torch.float32)
-        w_down_lora_b = w_down_lora_b.to(torch.float32)
         
         if b_q is not None:
             b_q, b_k, b_v, b_o, b_gate, b_up, b_down = b_q.to(torch.float32), b_k.to(torch.float32), b_v.to(torch.float32), b_o.to(torch.float32), b_gate.to(torch.float32), b_up.to(torch.float32), b_down.to(torch.float32)
         
         # layernorm or rmsnorm
         if norm_mode == "layernorm":
-            x_after_norm_1, mean_1, rstd_1, _, _ = layernorm_forward(x, norm_weight_1, norm_bias_1, eps = 1e-10)
+            x_after_norm_1, mean_1, rstd_1, _, _ = layernorm_forward(x, norm_weight_1, norm_bias_1, eps = 1e-5)
         else:
-            x_after_norm_1, mean_1, rstd_1, _, _ = rmsnorm_forward(x, norm_weight_1, eps = 1e-10)
+            x_after_norm_1, mean_1, rstd_1, _, _ = rmsnorm_forward(x, norm_weight_1, eps = 1e-5)
             
         # compute q,k,v
         # forward process: q_proj
@@ -241,9 +224,9 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         
         # layernorm or rmsnorm
         if norm_mode == "layernorm":
-            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = layernorm_forward(x_1_final, norm_weight_2, norm_bias_2, eps = 1e-10)
+            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = layernorm_forward(x_1_final, norm_weight_2, norm_bias_2, eps = 1e-5)
         else:
-            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = rmsnorm_forward(x_1_final, norm_weight_2, eps = 1e-10)
+            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = rmsnorm_forward(x_1_final, norm_weight_2, eps = 1e-5)
             
         # forward process: gate_proj
         gate, gate_main, gate_lora_a = lora_forward(w_gate, w_gate_quant_state, w_gate_lora_a, w_gate_lora_b, b_gate, x_after_norm_2, iteration)
@@ -510,12 +493,12 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         if ctx.norm_mode == "layernorm":
             grad_x_before_norm_2, grad_norm_weight_2 = layernorm_backward(
                 grad_norm_2, x_2_res, norm_weight_2, norm_bias_2, mean_2, rstd_2, # TODO: other params
-                True, 1e-10, ctx.num_warps, ctx.block_size
+                True, 1e-5, ctx.num_warps, ctx.block_size
             )
         else:
             grad_x_before_norm_2, grad_norm_weight_2 = rmsnorm_backward(
                 grad_norm_2, x_2_res, norm_weight_2, mean_2, rstd_2, # TODO: other params
-                True, 1e-10, ctx.num_warps, ctx.block_size
+                True, 1e-5, ctx.num_warps, ctx.block_size
             )
         
         # residual connection
@@ -580,12 +563,12 @@ class MixedSparseSingleLayerWithGateFunc(torch.autograd.Function):
         if ctx.norm_mode == "layernorm":
             grad_x_before_norm_1, grad_norm_weight_1 = layernorm_backward(
                 grad_norm_1, x_1_res, norm_weight_1, norm_bias_1, mean_1, rstd_1, # TODO: other params
-                True, 1e-10, ctx.num_warps, ctx.block_size
+                True, 1e-5, ctx.num_warps, ctx.block_size
             )
         else:
             grad_x_before_norm_1, grad_norm_weight_1 = rmsnorm_backward(
                 grad_norm_1, x_1_res, norm_weight_1, mean_1, rstd_1, # TODO: other params
-                True, 1e-10, ctx.num_warps, ctx.block_size
+                True, 1e-5, ctx.num_warps, ctx.block_size
             )
             
         # residual connection

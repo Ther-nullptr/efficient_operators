@@ -118,9 +118,9 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         
         # layernorm or rmsnorm
         if norm_mode == "layernorm":
-            x_after_norm_1, mean_1, rstd_1, _, _ = layernorm_forward(x, norm_weight_1, norm_bias_1, eps = 1e-10)
+            x_after_norm_1, mean_1, rstd_1, _, _ = layernorm_forward(x, norm_weight_1, norm_bias_1, eps = 1e-5)
         else:
-            x_after_norm_1, mean_1, rstd_1, _, _ = rmsnorm_forward(x, norm_weight_1, eps = 1e-10)
+            x_after_norm_1, mean_1, rstd_1, _, _ = rmsnorm_forward(x, norm_weight_1, eps = 1e-5)
 
         # compute q,k,v
         # forward process: q_proj
@@ -158,9 +158,13 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
 
         # forward: softmax
         a = torch.softmax(s, dim=-1).to(torch.float32)  # [bsz, num_heads, q_len, q_len]
-
+        
+        # dropout
+        if training:
+            a_drop = dropout_forward(a, 0.1, iteration)
+        
         # forward: O = A @ V
-        o = a @ v
+        o = a_drop @ v
         
         # reshape
         o = head_to_hidden_shape(o)
@@ -173,6 +177,10 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
             q = q_main
             k = k_main
             v = v_main
+            
+        # dropout
+        if training:
+            o_final = dropout_forward(o_final, 0.1, iteration)
             
         # residual connection
         x_1_final = x_1_res + o_final
@@ -201,9 +209,9 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         
         # layernorm or rmsnorm
         if norm_mode == "layernorm":
-            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = layernorm_forward(x_1_final, norm_weight_2, norm_bias_2, eps = 1e-10)
+            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = layernorm_forward(x_1_final, norm_weight_2, norm_bias_2, eps = 1e-5)
         else:
-            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = rmsnorm_forward(x_1_final, norm_weight_2, eps = 1e-10)
+            x_after_norm_2, mean_2, rstd_2, block_size, num_warps = rmsnorm_forward(x_1_final, norm_weight_2, eps = 1e-5)
         
         # forward process: up_proj
         up, up_main, up_lora_a = lora_forward(w_up, w_up_quant_state, w_up_lora_a, w_up_lora_b, b_up, x_after_norm_2, iteration)
@@ -221,6 +229,10 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
 
         # forward process: down_proj
         down, down_main, down_lora_a = lora_forward(w_down, w_down_quant_state, w_down_lora_a, w_down_lora_b, b_down, fn, iteration)
+        
+        # dropout
+        if training:
+            down = dropout_forward(down, 0.1, iteration)
         
         # residual connection
         x_2_final = x_2_res + down
@@ -409,7 +421,8 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
             x_2_res = (x_2_res + o_lora_a @ w_o_lora_b).to(torch.float32)
         
         # down proj part
-        grad_w_down_lora_a, grad_w_down_lora_b, grad_fn = lora_backward(w_down, w_down_quant_state, w_down_lora_a, w_down_lora_b, fn, down_lora_a, grad_output, ctx.iteration)
+        grad_output_dropout = dropout_backward(grad_output, 0.1, ctx.iteration)
+        grad_w_down_lora_a, grad_w_down_lora_b, grad_fn = lora_backward(w_down, w_down_quant_state, w_down_lora_a, w_down_lora_b, fn, down_lora_a, grad_output_dropout, ctx.iteration)
         
         # TODO: activation backward
         # activation part
@@ -419,7 +432,7 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         elif ctx.activation_backward == "silu":
             grad_up = grad_fn * d_silu(up)
         elif ctx.activation_backward == "gelu":
-            grad_up = grad_fn * d_relu(up)
+            grad_up = grad_fn * d_gelu(up)
         
         # up proj part
         grad_w_up_lora_a, grad_w_up_lora_b, grad_norm_2 = lora_backward(w_up, w_up_quant_state, w_up_lora_a, w_up_lora_b, x_after_norm_2, up_lora_a, grad_up, ctx.iteration)
@@ -428,19 +441,20 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         if ctx.norm_mode == "layernorm":
             grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = layernorm_backward(
                 grad_norm_2, x_2_res, norm_weight_2, norm_bias_2, mean_2, rstd_2,
-                True, 1e-10, ctx.num_warps, ctx.block_size
+                True, 1e-5, ctx.num_warps, ctx.block_size
             )
         else:
             grad_x_before_norm_2, grad_norm_weight_2, grad_norm_bias_2 = rmsnorm_backward(
                 grad_norm_2, x_2_res, norm_weight_2, mean_2, rstd_2, # TODO: other params
-                True, 1e-10, ctx.num_warps, ctx.block_size
+                True, 1e-5, ctx.num_warps, ctx.block_size
             )
         
         # residual connection
         grad_x_before_norm_2 += grad_output
         
         # o part
-        grad_w_o_lora_a, grad_w_o_lora_b, grad_o = lora_backward(w_o, w_o_quant_state, w_o_lora_a, w_o_lora_b, o, o_lora_a, grad_x_before_norm_2, ctx.iteration)
+        grad_x_before_norm_2_dropout = dropout_backward(grad_x_before_norm_2, 0.1, ctx.iteration)
+        grad_w_o_lora_a, grad_w_o_lora_b, grad_o = lora_backward(w_o, w_o_quant_state, w_o_lora_a, w_o_lora_b, o, o_lora_a, grad_x_before_norm_2_dropout, ctx.iteration)
         
         # reshape
         grad_o = hidden_to_head_shape(grad_o, ctx.num_heads)
@@ -458,6 +472,8 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         # d L / d V = A.T @ d L / d O
         grad_v = a.transpose(-2, -1) @ grad_o
         grad_a = grad_o @ v.transpose(-2, -1)
+        
+        grad_a = dropout_backward(grad_a, 0.1, ctx.iteration)
 
         # backward of softmax
         grad_s = (grad_a - (grad_a * a).sum(dim=-1, keepdims=True)) * a
@@ -493,12 +509,12 @@ class MixedSparseSingleLayerNaiveFunc(torch.autograd.Function):
         if ctx.norm_mode == "layernorm":
             grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = layernorm_backward(
                 grad_norm_1, x_1_res, norm_weight_1, norm_bias_1, mean_1, rstd_1, # TODO: other params
-                True, 1e-10, ctx.num_warps, ctx.block_size
+                True, 1e-5, ctx.num_warps, ctx.block_size
             )
         else:
             grad_x_before_norm_1, grad_norm_weight_1, grad_norm_bias_1 = rmsnorm_backward(
                 grad_norm_1, x_1_res, norm_weight_1, mean_1, rstd_1, # TODO: other params
-                True, 1e-10, ctx.num_warps, ctx.block_size
+                True, 1e-5, ctx.num_warps, ctx.block_size
             )
             
         # residual connection
