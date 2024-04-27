@@ -13,6 +13,10 @@ from gact.memory_efficient_function import (
     jpeg_compression,
     naive_adjustment,
 )
+from compress_function import (
+    fake_divide_outliner_suboutlinear_svd,
+    get_statistics
+)
 
 
 HAS_APEX = False
@@ -155,16 +159,14 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
         ctx,
         x,
         normalized_shape,
+        outliner_ratio,
+        sub_outliner_ratio,
+        rank, 
         weight,
+        bias,
         eps,
-        compress_type,
-        jpeg_processor,
-        dct_processor,
-        quantization_shape=64,
-        use_4bit=False,
-        prune_ratio=0.75,
-        iteration=0,
-        static_value=0,
+        iteration,
+        static_value,
     ):
         # allocate output
         x = x.contiguous()
@@ -195,125 +197,80 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
             num_warps=num_warps,
         )
 
-        ctx.needs_inputs_grad = x.requires_grad or weight.requires_grad
-        ctx.compress_type = compress_type
-        ctx.quantization_shape = quantization_shape
+                # we just need to use the first batch to calculate the outliner
+        if iteration < 10:
+            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio)
+        else:
+            outliner = static_value[0]
+            max_norm_column_list = static_value[1]            
+
+        # inorder to mark save_for_backward, we should convert the tensor
+        max_norm_column_list = torch.tensor(max_norm_column_list)
+            
+        x = fake_divide_outliner_suboutlinear_svd(x, outliner, max_norm_column_list, scale, rank)
         
-        kth_val = torch.tensor(0.0, device=x.device)
-
-        if compress_type == "NF4":
-            x, quant_state = F.quantize_nf4(x)
-            ctx.quant_state = quant_state
-        elif compress_type == "PRUNE_ROW":
-            if iteration < 10:
-                kth_val = torch.kthvalue(
-                    x.abs().flatten(), int(x.numel() * prune_ratio)
-                ).values
-            else:
-                kth_val = static_value
-            mask = x.abs() > kth_val
-            x = x * mask
-        elif compress_type != "NONE":
-            input_shape = x.shape
-            ctx.input_shape = input_shape
-            if use_4bit:
-                x, quant_state = per_block_quantization_4bit(
-                    x, input_shape, quantization_shape
-                )
-            else:
-                x, quant_state = per_block_quantization(
-                    x, input_shape, quantization_shape
-                )
-            ctx.quant_state = quant_state
-
-            if compress_type == "PRUNE":
-                kth_val = torch.kthvalue(
-                    x.abs().flatten(), int(x.numel() * 0.25)
-                ).values
-                x = torch.where(x.abs() < kth_val, torch.zeros_like(x), x)
-                x = naive_adjustment(x, input_shape, quantization_shape)
-
-            if compress_type == "JPEG":
-                x = jpeg_compression(x, input_shape, jpeg_processor, quantization_shape)
-
-            elif compress_type == "DCT":
-                x = dct_compression(x, input_shape, dct_processor, quantization_shape)
-
-            elif compress_type == "NAIVE":
-                x = naive_adjustment(x, input_shape, quantization_shape)
-
-        ctx.mark_non_differentiable(kth_val)
+        ctx.mark_non_differentiable(outliner, max_norm_column_list)
         ctx.save_for_backward(x, weight, mean, rstd)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps
         ctx.eps = eps
         y = y.contiguous()
-        return y, kth_val
+
+        return y, outliner, max_norm_column_list
 
     @staticmethod
     def backward(ctx, dy, grad_kth_val):
         x, w, m, v = ctx.saved_tensors
-        quantization_shape = ctx.quantization_shape
         dx, dw = None, None
 
-        if ctx.needs_inputs_grad:
-            if ctx.compress_type == "NF4":
-                x = F.dequantize_nf4(x, ctx.quant_state)
-            elif ctx.compress_type != "NONE" and ctx.compress_type != "PRUNE_ROW":
-                quant_state = ctx.quant_state
-                input_shape = ctx.input_shape
-                x = per_block_dequantization(
-                    x, input_shape, quant_state, quantization_shape
-                )
+        # heuristics for amount of parallel reduction stream for DW/DB
+        N = w.shape[0]
+        GROUP_SIZE_M = 64
+        if N <= 8192:
+            GROUP_SIZE_M = 96
+        if N <= 4096:
+            GROUP_SIZE_M = 128
+        if N <= 1024:
+            GROUP_SIZE_M = 256
+        # allocate output
+        locks = torch.zeros(2 * GROUP_SIZE_M, dtype=torch.int32, device="cuda")
+        _dw = torch.empty(
+            (GROUP_SIZE_M, w.shape[0]), dtype=x.dtype, device=w.device
+        )
+        dw = torch.empty((w.shape[0],), dtype=w.dtype, device=w.device)
+        dx = torch.empty_like(dy)
+        # enqueue kernel using forward pass heuristics
+        # also compute partial sums for DW and DB
+        x_arg = x.reshape(-1, x.shape[-1])
+        M, N = x_arg.shape
+        _rms_norm_bwd_dx_fused[(M,)](  #
+            dx,
+            dy,
+            _dw,
+            x,
+            w,
+            m,
+            v,
+            locks,  #
+            x_arg.stride(0),
+            N,
+            ctx.eps,  #
+            BLOCK_SIZE_N=ctx.BLOCK_SIZE,  #
+            GROUP_SIZE_M=GROUP_SIZE_M,  #
+            num_warps=ctx.num_warps,
+        )
+        grid = lambda meta: [triton.cdiv(N, meta["BLOCK_SIZE_N"])]
+        # accumulate partial sums in separate kernel
+        _rms_norm_bwd_dwdb[grid](
+            _dw,
+            dw,
+            min(GROUP_SIZE_M, M),
+            N,  #
+            BLOCK_SIZE_M=32,  #
+            BLOCK_SIZE_N=128,
+        )
 
-            # heuristics for amount of parallel reduction stream for DW/DB
-            N = w.shape[0]
-            GROUP_SIZE_M = 64
-            if N <= 8192:
-                GROUP_SIZE_M = 96
-            if N <= 4096:
-                GROUP_SIZE_M = 128
-            if N <= 1024:
-                GROUP_SIZE_M = 256
-            # allocate output
-            locks = torch.zeros(2 * GROUP_SIZE_M, dtype=torch.int32, device="cuda")
-            _dw = torch.empty(
-                (GROUP_SIZE_M, w.shape[0]), dtype=x.dtype, device=w.device
-            )
-            dw = torch.empty((w.shape[0],), dtype=w.dtype, device=w.device)
-            dx = torch.empty_like(dy)
-            # enqueue kernel using forward pass heuristics
-            # also compute partial sums for DW and DB
-            x_arg = x.reshape(-1, x.shape[-1])
-            M, N = x_arg.shape
-            _rms_norm_bwd_dx_fused[(M,)](  #
-                dx,
-                dy,
-                _dw,
-                x,
-                w,
-                m,
-                v,
-                locks,  #
-                x_arg.stride(0),
-                N,
-                ctx.eps,  #
-                BLOCK_SIZE_N=ctx.BLOCK_SIZE,  #
-                GROUP_SIZE_M=GROUP_SIZE_M,  #
-                num_warps=ctx.num_warps,
-            )
-            grid = lambda meta: [triton.cdiv(N, meta["BLOCK_SIZE_N"])]
-            # accumulate partial sums in separate kernel
-            _rms_norm_bwd_dwdb[grid](
-                _dw,
-                dw,
-                min(GROUP_SIZE_M, M),
-                N,  #
-                BLOCK_SIZE_M=32,  #
-                BLOCK_SIZE_N=128,
-            )
-
-        return dx, None, None, None, None, None, None, None, None, None, None, None
+        return dx, None, None, None, None, None, None, None, None, None, None
 
 
 class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
@@ -323,52 +280,45 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
         eps=1e-05,
         elementwise_affine=True,
         bias=True,
-        compress_type: str = "JPEG",
-        compress_quality: int = 50,
-        quantization_shape: int = 64,
-        use_4bit: bool = False,
-        prune_ratio: float = 0.75,
+        outliner_ratio: float = 0.01,
+        sub_outliner_ratio: float = 0.1, #! initialize
+        rank: int = 16,
     ):
         super(EfficientMemoryRMSNorm, self).__init__(
             normalized_shape, eps, elementwise_affine, bias
         )
-        self.compress_type = compress_type
-        self.compress_quality = compress_quality
-        self.jpeg_processor = JPEGProcessor(quality=compress_quality)
-        self.dct_processor = DCTProcessor(
-            quality=compress_quality, interpolation=quantization_shape / 64
-        )
-        self.quantization_shape = quantization_shape
-        self.use_4bit = use_4bit
-        self.prune_ratio = prune_ratio
+        self.outliner_ratio = outliner_ratio
+        self.sub_outliner_ratio = sub_outliner_ratio
+        self.rank = rank
         self.iteration = 0
-        self.static_value = None
+        self.static_value = [None, None]
 
     def forward(self, x):
-        if self.extract_mode:
-            torch.save(x, f"output/{self.name}.pt")
-
-        result, static_value = EfficientMemoryRMSNormFunc.apply(
+        result, outliner, max_norm_column_list = EfficientMemoryRMSNormFunc.apply(
             x,
             self.normalized_shape,
+            self.outliner_ratio,
+            self.sub_outliner_ratio,
+            self.rank, 
             self.weight,
+            self.bias,
             self.eps,
-            self.compress_type,
-            self.jpeg_processor,
-            self.dct_processor,
-            self.quantization_shape,
-            self.use_4bit,
-            self.prune_ratio,
             self.iteration,
             self.static_value,
         )
         
-        self.static_value = (
-            static_value
-            if self.static_value is None
-            else (self.iteration * self.static_value + static_value)
-            / (self.iteration + 1)
-        )
+        if self.iteration <= 10:
+            self.static_value[0] = (
+                outliner
+                if self.static_value[0] is None
+                else (self.iteration * self.static_value[0] + outliner)
+                / (self.iteration + 1)
+            )
+            self.static_value[1] = (
+                max_norm_column_list
+                if self.static_value[1] is None
+                else self.static_value[1]
+            )
         self.iteration += 1
 
         return result

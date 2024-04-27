@@ -46,8 +46,8 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
         x2 = fake_divide_outliner_suboutlinear_svd(x2, outliner_2, max_norm_column_list_2, scale_2, rank)
         
         ctx.mark_non_differentiable(outliner_1, max_norm_column_list_1, outliner_2, max_norm_column_list_2)
-
         ctx.save_for_backward(x1, x2)
+        
         return result, outliner_1, max_norm_column_list_1, outliner_2, max_norm_column_list_2
             
     def backward(ctx, grad_output, grad_outliner_1, grad_max_norm_column_list_1, grad_outliner_2, grad_max_norm_column_list_2):
