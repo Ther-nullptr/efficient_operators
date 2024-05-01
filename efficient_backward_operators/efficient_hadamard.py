@@ -1,15 +1,8 @@
 import torch
-from compress_function import (
+from .compress_function import (
     fake_divide_outliner_suboutlinear_svd,
     get_statistics
 )
-
-num_heads, head_dim = 32, 128
-def _shape(tensor: torch.Tensor, seq_len: int, bsz: int):
-    # (bsz, seq_len, hidden_dim) -> (bsz, num_heads, seq_len, head_dim) -> (bsz * num_heads, seq_len, head_dim)
-    tensor = tensor.view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
-    tensor = tensor.reshape(-1, *tensor.shape[2:]).contiguous()
-    return tensor
 
 class EfficientMemoryHadamardFunc(torch.autograd.Function):
     @staticmethod
@@ -19,8 +12,10 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
         x2,
         outliner_ratio_1,
         sub_outliner_ratio_1,
+        sub_outliner_bit_1,
         outliner_ratio_2,
         sub_outliner_ratio_2,
+        sub_outliner_bit_2,
         rank, 
         iteration,
         static_value_1,
@@ -31,31 +26,32 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
         # we just need to use the first batch to calculate the outliner
         # for the value 1
         if iteration < 10:
-            outliner_1, max_norm_column_list_1, scale_1 = get_statistics(x1, iteration, outliner_ratio_1, sub_outliner_ratio_1)
-            outliner_2, max_norm_column_list_2, scale_2 = get_statistics(x2, iteration, outliner_ratio_2, sub_outliner_ratio_2)
+            outliner_1, max_norm_column_list_1, scale_1 = get_statistics(x1, iteration, outliner_ratio_1, sub_outliner_ratio_1, sub_outliner_bit_1)
+            outliner_2, max_norm_column_list_2, scale_2 = get_statistics(x2, iteration, outliner_ratio_2, sub_outliner_ratio_2, sub_outliner_bit_2)
+            max_norm_column_list_1 = torch.tensor(max_norm_column_list_1)
+            max_norm_column_list_2 = torch.tensor(max_norm_column_list_2)
         else:
             outliner_1 = static_value_1[0]
             max_norm_column_list_1 = static_value_1[1]
+            scale_1 = static_value_1[2]
             outliner_2 = static_value_2[0]
             max_norm_column_list_2 = static_value_2[1]
-            
-        max_norm_column_list_1 = torch.tensor(max_norm_column_list_1)
-        max_norm_column_list_2 = torch.tensor(max_norm_column_list_2)
+            scale_2 = static_value_2[2]
         
-        x1 = fake_divide_outliner_suboutlinear_svd(x1, outliner_1, max_norm_column_list_1, scale_1, rank)
-        x2 = fake_divide_outliner_suboutlinear_svd(x2, outliner_2, max_norm_column_list_2, scale_2, rank)
+        x1 = fake_divide_outliner_suboutlinear_svd(x1, outliner_1, max_norm_column_list_1, scale_1, rank, sub_outliner_bit_1, sub_outliner_ratio_1)
+        x2 = fake_divide_outliner_suboutlinear_svd(x2, outliner_2, max_norm_column_list_2, scale_2, rank, sub_outliner_bit_2, sub_outliner_ratio_2)
         
         ctx.mark_non_differentiable(outliner_1, max_norm_column_list_1, outliner_2, max_norm_column_list_2)
-        ctx.save_for_backward(x1, x2)
         
-        return result, outliner_1, max_norm_column_list_1, outliner_2, max_norm_column_list_2
+        ctx.save_for_backward(x1, x2)
+        return result, outliner_1, max_norm_column_list_1, scale_1, outliner_2, max_norm_column_list_2, scale_2
             
-    def backward(ctx, grad_output, grad_outliner_1, grad_max_norm_column_list_1, grad_outliner_2, grad_max_norm_column_list_2):
+    def backward(ctx, grad_output, grad_outliner_1, grad_max_norm_column_list_1, grad_scale_1, grad_outliner_2, grad_max_norm_column_list_2, grad_scale_2):
         x1, x2 = ctx.saved_tensors
         grad_input1, grad_input2 = None, None
 
         grad_input1 = grad_output * x2
-        grad_input2 = grad_output * x1
+        grad_input2 = x1 * grad_output
 
         return (
             grad_input1,
@@ -68,6 +64,8 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None
         )
 
 
@@ -75,29 +73,35 @@ class EfficientMemoryHadamard(torch.nn.Module):
     def __init__(
         self,
         outliner_ratio_1: float = 0.01,
-        sub_outliner_ratio_1: float = 0.1,
+        sub_outliner_ratio_1: float = 0.2,
+        sub_outliner_bit_1: int = 8,
         outliner_ratio_2: float = 0.01,
-        sub_outliner_ratio_2: float = 0.1,
+        sub_outliner_ratio_2: float = 0.2,
+        sub_outliner_bit_2: int = 8,
         rank: int = 16,
     ):
-        super(EfficientMemoryHadamard).__init__()
+        super(EfficientMemoryHadamard, self).__init__()
         self.outliner_ratio_1 = outliner_ratio_1
         self.sub_outliner_ratio_1 = sub_outliner_ratio_1
+        self.sub_outliner_bit_1 = sub_outliner_bit_1
         self.outliner_ratio_2 = outliner_ratio_2
         self.sub_outliner_ratio_2 = sub_outliner_ratio_2
+        self.sub_outliner_bit_2 = sub_outliner_bit_2
         self.rank = rank
         self.iteration = 0
-        self.static_value_1 = [None, None]
-        self.static_value_2 = [None, None]
+        self.static_value_1 = [None, None, None]
+        self.static_value_2 = [None, None, None]
 
     def forward(self, x1, x2):
-        result, outliner_1, max_norm_column_list_1, outliner_2, max_norm_column_list_2 = EfficientMemoryHadamardFunc.apply(
+        result, outliner_1, max_norm_column_list_1, scale_1, outliner_2, max_norm_column_list_2, scale_2 = EfficientMemoryHadamardFunc.apply(
             x1,
             x2,
             self.outliner_ratio_1,
             self.sub_outliner_ratio_1,
+            self.sub_outliner_bit_1,
             self.outliner_ratio_2,
             self.sub_outliner_ratio_2,
+            self.sub_outliner_bit_2,
             self.rank,
             self.iteration,
             self.static_value_1,
@@ -113,7 +117,12 @@ class EfficientMemoryHadamard(torch.nn.Module):
             self.static_value_1[1] = (
                 max_norm_column_list_1
                 if self.static_value_1[1] is None
-                else (self.iteration * self.static_value_1[1] + max_norm_column_list_1)
+                else self.static_value_1[1]
+            )
+            self.static_value_1[2] = (
+                scale_1
+                if self.static_value_1[2] is None
+                else (self.iteration * self.static_value_1[2] + scale_1)
                 / (self.iteration + 1)
             )
             self.static_value_2[0] = (
@@ -125,9 +134,15 @@ class EfficientMemoryHadamard(torch.nn.Module):
             self.static_value_2[1] = (
                 max_norm_column_list_2
                 if self.static_value_2[1] is None
-                else (self.iteration * self.static_value_2[1] + max_norm_column_list_2)
+                else self.static_value_2[1]
+            )
+            self.static_value_2[2] = (
+                scale_2
+                if self.static_value_2[2] is None
+                else (self.iteration * self.static_value_2[2] + scale_2)
                 / (self.iteration + 1)
             )
+            
         self.iteration += 1
 
         return result

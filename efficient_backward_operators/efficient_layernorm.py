@@ -2,7 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
-from compress_function import (
+from .compress_function import (
     fake_divide_outliner_suboutlinear_svd,
     get_statistics
 )
@@ -206,6 +206,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
         normalized_shape,
         outliner_ratio,
         sub_outliner_ratio,
+        sub_outliner_bit,
         rank, 
         weight,
         bias,
@@ -245,15 +246,15 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
         
         # we just need to use the first batch to calculate the outliner
         if iteration < 10:
-            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio)
+            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit)
+            # inorder to mark save_for_backward, we should convert the tensor
+            max_norm_column_list = torch.tensor(max_norm_column_list)
         else:
             outliner = static_value[0]
-            max_norm_column_list = static_value[1]            
-
-        # inorder to mark save_for_backward, we should convert the tensor
-        max_norm_column_list = torch.tensor(max_norm_column_list)
+            max_norm_column_list = static_value[1]
+            scale = static_value[2]         
             
-        x = fake_divide_outliner_suboutlinear_svd(x, outliner, max_norm_column_list, scale, rank)
+        x = fake_divide_outliner_suboutlinear_svd(x, outliner, max_norm_column_list, scale, rank, sub_outliner_bit, sub_outliner_ratio)
         
         ctx.mark_non_differentiable(outliner, max_norm_column_list)
         ctx.save_for_backward(x, weight, bias, mean, rstd)
@@ -262,10 +263,10 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
         ctx.eps = eps
         y = y.contiguous()
         
-        return y, outliner, max_norm_column_list
+        return y, outliner, max_norm_column_list, scale
 
     @staticmethod
-    def backward(ctx, dy, grad_outliner, grad_max_norm_column_list):
+    def backward(ctx, dy, grad_outliner, grad_max_norm_column_list, grad_scale):
         x, w, b, m, v = ctx.saved_tensors
         dx, dw, db = None, None, None
 
@@ -324,7 +325,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
             BLOCK_SIZE_N=128,
         )
 
-        return dx, None, None, None, None, None, None, None, None, None, None
+        return dx, None, None, None, None, None, None, None, None, None, None, None
 
 
 class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
@@ -335,7 +336,8 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
         elementwise_affine=True,
         bias=True,
         outliner_ratio: float = 0.01,
-        sub_outliner_ratio: float = 0.1, #! initialize
+        sub_outliner_ratio: float = 0.2, #! initialize
+        sub_outliner_bit: int = 8,
         rank: int = 16,
     ):
         super(EfficientMemoryLayerNorm, self).__init__(
@@ -343,16 +345,18 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
         )
         self.outliner_ratio = outliner_ratio
         self.sub_outliner_ratio = sub_outliner_ratio
+        self.sub_outliner_bit = sub_outliner_bit
         self.rank = rank
         self.iteration = 0
-        self.static_value = [None, None]
+        self.static_value = [None, None, None]
 
     def forward(self, x):
-        result, outliner, max_norm_column_list = EfficientMemoryLayerNormFunc.apply(
+        result, outliner, max_norm_column_list, scale = EfficientMemoryLayerNormFunc.apply(
             x,
             self.normalized_shape,
             self.outliner_ratio,
             self.sub_outliner_ratio,
+            self.sub_outliner_bit,
             self.rank, 
             self.weight,
             self.bias,
@@ -372,6 +376,12 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
                 max_norm_column_list
                 if self.static_value[1] is None
                 else self.static_value[1]
+            )
+            self.static_value[2] = (
+                scale
+                if self.static_value[2] is None
+                else (self.iteration * self.static_value[2] + scale) 
+                / (self.iteration + 1)
             )
         self.iteration += 1
 
