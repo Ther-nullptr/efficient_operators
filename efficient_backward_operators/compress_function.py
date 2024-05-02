@@ -79,16 +79,19 @@ def fake_divide_outliner_suboutlinear_svd(x: torch.Tensor, outliner: float, max_
     x = x - x_outliner
     
     # step 2: prune the suboutliner
-    if sub_outliner_ratio < 1.:
-        mask_2 = torch.zeros_like(x).to(x.device).to(x.dtype)
-        mask_2[:, :, max_norm_column_list] = 1
-        mask_2 = mask_2.bool()
-
-        x_sub_outliner = x * mask_2
-        x = x - x_sub_outliner
+    if sub_outliner_ratio == 0.:
+        x_sub_outliner = 0.
     else:
-        x_sub_outliner = x
-    x_sub_outliner = torch.clamp(torch.round(x_sub_outliner / (scale + 1e-10)), min=-(2 ** (sub_outliner_bit - 1)), max=2 ** (sub_outliner_bit - 1) - 1) * scale
+        if sub_outliner_ratio < 1.:
+            mask_2 = torch.zeros_like(x).to(x.device).to(x.dtype)
+            mask_2[:, :, max_norm_column_list] = 1
+            mask_2 = mask_2.bool()
+
+            x_sub_outliner = x * mask_2
+            x = x - x_sub_outliner
+        else:
+            x_sub_outliner = x
+        x_sub_outliner = torch.clamp(torch.round(x_sub_outliner / (scale + 1e-10)), min=-(2 ** (sub_outliner_bit - 1)), max=2 ** (sub_outliner_bit - 1) - 1) * scale
     
     # step 3: apply SVD
     if rank > 0:
@@ -99,9 +102,70 @@ def fake_divide_outliner_suboutlinear_svd(x: torch.Tensor, outliner: float, max_
     
     if is_head:
         x = hidden_to_head_shape(x, num_heads=num_heads)
-    
     return x
 
+
+def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: float, scale: float, sub_outliner_bit: int = 8, sub_outliner_ratio: float = 1.):
+    is_head = len(x.shape) == 4
+    if is_head:
+        num_heads = x.shape[1]
+        x = head_to_hidden_shape(x)
+    
+    # step 1: prune the outliner
+    mask_1 = (x.abs() > outliner)
+    x_outliner = x * mask_1
+    x = x - x_outliner
+    # compress the x_outlier
+    x_outlier_compressed = x_outlier_compressed.to_sparse() # coo
+    
+    # step 2: prune the suboutliner
+    if sub_outliner_ratio == 0.:
+        x_sub_outliner = 0.
+    else:
+        x_sub_outliner = x
+        assert (sub_outliner_bit % 2 == 0) or (sub_outliner_bit == 1), "Only support 2,4,8 bit quantization"
+        x_sub_outliner = torch.clamp(torch.round(x_sub_outliner / (scale + 1e-10)), min=-(2 ** (sub_outliner_bit - 1)), max=2 ** (sub_outliner_bit - 1) - 1)
+        # now the x_sub_outlier is int type, then we can use bit squeeze method
+        # since the shape is [bs, seq_len, hidden_dim], and hidden_dim is usually divisble by 8, so use hidden_dim dim to squeeze
+        hidden_dim = x_sub_outliner.shape[-1]
+        
+        if sub_outliner_bit == 8:
+            x_sub_outliner_compressed = x_sub_outliner
+        elif sub_outliner_bit == 4:
+            # shift to positive
+            x_sub_outliner = x_sub_outliner.to(torch.uint8) + 8
+            x_sub_outliner_compressed = x_sub_outliner[..., 0:hidden_dim // 2] + torch.bitwise_left_shift(x_sub_outliner[..., hidden_dim // 2:], 4)
+        elif sub_outliner_bit == 2:
+            x_sub_outliner = x_sub_outliner.to(torch.uint8) + 2
+            x_sub_outliner_compressed = x_sub_outliner[..., 0:hidden_dim // 4] + torch.bitwise_left_shift(x_sub_outliner[..., hidden_dim // 4:hidden_dim // 2] + torch.bitwise_left_shift(x_sub_outliner[..., hidden_dim // 2:hidden_dim // 4 * 3] + torch.bitwise_left_shift(x_sub_outliner[..., hidden_dim // 4 * 3:hidden_dim], 2), 2), 2)
+    
+    return x_outlier_compressed, x_sub_outliner_compressed, scale
+
+
+def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, sub_outliner_bit, scale):
+    # step 1: decompress the outliers
+    x_outlier = x_outlier_compressed.to_dense()
+   
+    # step 2: decompress the sub_outliners
+    if sub_outliner_bit == 8:
+        # just return to the original value
+        x_sub_outliner = x_sub_outliner_compressed * scale
+    elif sub_outliner_bit == 4:
+        x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 4)
+        x_sub_outliner_2nd = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 4)
+        x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd), dim=-1)
+        x_sub_outliner = ((x_sub_outliner - 8).to(x_outlier.dtype)) * scale
+    elif sub_outliner_bit == 2:
+        x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 2)
+        x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 2)
+        x_sub_outliner_2nd = x_sub_outliner_compressed % (2 ** 2)
+        x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_2nd) // (2 ** 2)
+        x_sub_outliner_3rd = x_sub_outliner_compressed % (2 ** 2)
+        x_sub_outliner_4th = (x_sub_outliner_compressed - x_sub_outliner_3rd) // (2 ** 2)
+        x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th), dim=-1)
+        x_sub_outliner = ((x_sub_outliner - 2).to(x_outlier.dtype)) * scale
+        
+    return x_outlier + x_sub_outliner
 
 def prune_softmax(x: torch.Tensor, outliner: float):
     mask = (x > outliner)
@@ -124,10 +188,12 @@ def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_o
 
     x_outliner = x[0] * (x[0].abs() > outliner)
     x = x - x_outliner
-    x_sub_outliner = x[0][:, max_norm_column_list]
-    # TODO: set the scale factor to per channel or per tensor?
-    
-    scale = (x_sub_outliner.max() - x_sub_outliner.min()) / (2 ** sub_outliner_bit)
+    if sub_outliner_ratio > 0:
+        x_sub_outliner = x[0][:, max_norm_column_list]
+        # TODO: set the scale factor to per channel or per tensor?
+        scale = (x_sub_outliner.max() - x_sub_outliner.min()) / (2 ** sub_outliner_bit)
+    else:
+        scale = 0
     return outliner, max_norm_column_list, scale
 
 
