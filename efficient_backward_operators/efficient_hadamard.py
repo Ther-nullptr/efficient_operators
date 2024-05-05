@@ -1,6 +1,7 @@
 import torch
 from .compress_function import (
-    fake_divide_outliner_suboutlinear_svd,
+    true_divide_outliner_suboutlinear_svd_compress,
+    true_divide_outliner_suboutlinear_svd_decompress,
     get_statistics
 )
 
@@ -38,17 +39,21 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
             max_norm_column_list_2 = static_value_2[1]
             scale_2 = static_value_2[2]
         
-        x1 = fake_divide_outliner_suboutlinear_svd(x1, outliner_1, max_norm_column_list_1, scale_1, rank, sub_outliner_bit_1, sub_outliner_ratio_1)
-        x2 = fake_divide_outliner_suboutlinear_svd(x2, outliner_2, max_norm_column_list_2, scale_2, rank, sub_outliner_bit_2, sub_outliner_ratio_2)
-        
+        x1_outlier_compressed, x1_sub_outliner_compressed, scale1 = true_divide_outliner_suboutlinear_svd_compress(x1, outliner_1, scale_1, sub_outliner_bit_1, sub_outliner_ratio_1)
+        x2_outlier_compressed, x2_sub_outliner_compressed, scale2 = true_divide_outliner_suboutlinear_svd_compress(x2, outliner_2, scale_2, sub_outliner_bit_2, sub_outliner_ratio_2)
+        ctx.sub_outliner_bit_1 = sub_outliner_bit_1
+        ctx.sub_outliner_bit_2 = sub_outliner_bit_2
         ctx.mark_non_differentiable(outliner_1, max_norm_column_list_1, outliner_2, max_norm_column_list_2)
-        
-        ctx.save_for_backward(x1, x2)
+        ctx.save_for_backward(x1_outlier_compressed, x1_sub_outliner_compressed, scale1, x2_outlier_compressed, x2_sub_outliner_compressed, scale2)
+
         return result, outliner_1, max_norm_column_list_1, scale_1, outliner_2, max_norm_column_list_2, scale_2
             
     def backward(ctx, grad_output, grad_outliner_1, grad_max_norm_column_list_1, grad_scale_1, grad_outliner_2, grad_max_norm_column_list_2, grad_scale_2):
-        x1, x2 = ctx.saved_tensors
+        x1_outlier_compressed, x1_sub_outliner_compressed, scale1, x2_outlier_compressed, x2_sub_outliner_compressed, scale2 = ctx.saved_tensors
         grad_input1, grad_input2 = None, None
+        
+        x1 = true_divide_outliner_suboutlinear_svd_decompress(x1_outlier_compressed, x1_sub_outliner_compressed, ctx.sub_outliner_bit_1, scale1)
+        x2 = true_divide_outliner_suboutlinear_svd_decompress(x2_outlier_compressed, x2_sub_outliner_compressed, ctx.sub_outliner_bit_2, scale2)
 
         grad_input1 = grad_output * x2
         grad_input2 = x1 * grad_output

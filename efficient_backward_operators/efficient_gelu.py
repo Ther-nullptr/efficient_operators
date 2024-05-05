@@ -2,9 +2,11 @@ import math
 import torch
 import torch.nn.functional as F
 from .compress_function import (
-    fake_divide_outliner_suboutlinear_svd,
+    true_divide_outliner_suboutlinear_svd_compress,
+    true_divide_outliner_suboutlinear_svd_decompress,
     get_statistics
 )
+import bitsandbytes
 
 class EfficientMemoryGELUFunc(torch.autograd.Function):
     @staticmethod
@@ -30,16 +32,18 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
             max_norm_column_list = static_value[1]
             scale = static_value[2]
             
-        x = fake_divide_outliner_suboutlinear_svd(x, outliner, max_norm_column_list, scale, rank, sub_outliner_bit, sub_outliner_ratio)
+        x_outlier_compressed, x_sub_outliner_compressed, scale = true_divide_outliner_suboutlinear_svd_compress(x, outliner, scale, sub_outliner_bit, sub_outliner_ratio)
         
         ctx.mark_non_differentiable(outliner, max_norm_column_list)
-        ctx.save_for_backward(x)
+        ctx.save_for_backward(x_outlier_compressed, x_sub_outliner_compressed, scale)
+        ctx.sub_outliner_bit = sub_outliner_bit
         
         return result, outliner, max_norm_column_list, scale
 
     @staticmethod
     def backward(ctx, grad_output, grad_outliner, grad_max_norm_column_list, grad_scale):
-        (x,) = ctx.saved_tensors
+        (x_outlier_compressed, x_sub_outliner_compressed, scale) = ctx.saved_tensors
+        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale)
 
         gamma = math.sqrt(2 / math.pi)
         kappa = 0.044715

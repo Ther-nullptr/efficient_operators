@@ -116,45 +116,53 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     x_outliner = x * mask_1
     x = x - x_outliner
     # compress the x_outlier
-    x_outlier_compressed = x_outlier_compressed.to_sparse() # coo
+    x_outlier_compressed = x_outliner.to_sparse() # coo
+    del x_outliner
     
     # step 2: prune the suboutliner
     if sub_outliner_ratio == 0.:
         x_sub_outliner = 0.
+        x_sub_outliner_compressed = 0.
+        scale = 1.
     else:
         x_sub_outliner = x
         assert (sub_outliner_bit % 2 == 0) or (sub_outliner_bit == 1), "Only support 2,4,8 bit quantization"
-        x_sub_outliner = torch.clamp(torch.round(x_sub_outliner / (scale + 1e-10)), min=-(2 ** (sub_outliner_bit - 1)), max=2 ** (sub_outliner_bit - 1) - 1)
+        x_sub_outliner = torch.clamp(torch.round(x_sub_outliner / scale), min=-(2 ** (sub_outliner_bit - 1)), max=2 ** (sub_outliner_bit - 1) - 1)
         # now the x_sub_outlier is int type, then we can use bit squeeze method
         # since the shape is [bs, seq_len, hidden_dim], and hidden_dim is usually divisble by 8, so use hidden_dim dim to squeeze
         hidden_dim = x_sub_outliner.shape[-1]
         
         if sub_outliner_bit == 8:
-            x_sub_outliner_compressed = x_sub_outliner
+            x_sub_outliner_compressed = x_sub_outliner.to(torch.int8)
         elif sub_outliner_bit == 4:
             # shift to positive
-            x_sub_outliner = x_sub_outliner.to(torch.uint8) + 8
-            x_sub_outliner_compressed = x_sub_outliner[..., 0:hidden_dim // 2] + torch.bitwise_left_shift(x_sub_outliner[..., hidden_dim // 2:], 4)
+            x_sub_outliner = (x_sub_outliner + 8).to(torch.uint8)
+            x_sub_outliner_compressed = x_sub_outliner[..., 0:(hidden_dim // 2)] + x_sub_outliner[..., (hidden_dim // 2):] * (2 ** 4)
         elif sub_outliner_bit == 2:
-            x_sub_outliner = x_sub_outliner.to(torch.uint8) + 2
-            x_sub_outliner_compressed = x_sub_outliner[..., 0:hidden_dim // 4] + torch.bitwise_left_shift(x_sub_outliner[..., hidden_dim // 4:hidden_dim // 2] + torch.bitwise_left_shift(x_sub_outliner[..., hidden_dim // 2:hidden_dim // 4 * 3] + torch.bitwise_left_shift(x_sub_outliner[..., hidden_dim // 4 * 3:hidden_dim], 2), 2), 2)
+            x_sub_outliner = (x_sub_outliner + 2).to(torch.uint8)
+            x_sub_outliner_compressed = x_sub_outliner[..., ((hidden_dim // 4) * 3):hidden_dim] * (2 ** 6)
+            x_sub_outliner_compressed += x_sub_outliner[..., (hidden_dim // 2):((hidden_dim // 4) * 3)] * (2 ** 4)
+            x_sub_outliner_compressed += x_sub_outliner[..., (hidden_dim // 4):(hidden_dim // 2)] * (2 ** 2)
+            x_sub_outliner_compressed += x_sub_outliner[..., 0:(hidden_dim // 4)]
+        del x_sub_outliner
     
     return x_outlier_compressed, x_sub_outliner_compressed, scale
 
 
-def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, sub_outliner_bit, scale):
+def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, sub_outliner_bit, scale, is_head = False, num_heads = 1):
     # step 1: decompress the outliers
     x_outlier = x_outlier_compressed.to_dense()
    
     # step 2: decompress the sub_outliners
     if sub_outliner_bit == 8:
         # just return to the original value
-        x_sub_outliner = x_sub_outliner_compressed * scale
+        x_sub_outliner = x_sub_outliner_compressed.to(x_outlier.dtype) * scale
     elif sub_outliner_bit == 4:
         x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 4)
         x_sub_outliner_2nd = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 4)
         x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd), dim=-1)
-        x_sub_outliner = ((x_sub_outliner - 8).to(x_outlier.dtype)) * scale
+        del x_sub_outliner_1st, x_sub_outliner_2nd
+        x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 8) * scale
     elif sub_outliner_bit == 2:
         x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 2)
         x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 2)
@@ -163,9 +171,16 @@ def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub
         x_sub_outliner_3rd = x_sub_outliner_compressed % (2 ** 2)
         x_sub_outliner_4th = (x_sub_outliner_compressed - x_sub_outliner_3rd) // (2 ** 2)
         x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th), dim=-1)
-        x_sub_outliner = ((x_sub_outliner - 2).to(x_outlier.dtype)) * scale
+        del x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th
+        x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 2) * scale
         
-    return x_outlier + x_sub_outliner
+    x = x_outlier + x_sub_outliner
+
+    if is_head:
+        x = hidden_to_head_shape(x, num_heads=num_heads)
+    
+    return x
+
 
 def prune_softmax(x: torch.Tensor, outliner: float):
     mask = (x > outliner)
@@ -173,9 +188,20 @@ def prune_softmax(x: torch.Tensor, outliner: float):
     return x_outliner
 
 
+def true_compress_softmax(x: torch.Tensor, outliner: float):
+    mask = (x > outliner)
+    x_outliner = x * mask
+    x_outliner_sparse = x_outliner.to_sparse()
+    return x_outliner_sparse
+
+
+def true_decompress_softmax(x_sparse: torch.Tensor):
+    return x_sparse.to_dense()
+  
+
 def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_outliner_ratio: float, sub_outliner_bit: int = 8):
     outliner = torch.kthvalue(x[0].flatten(), int(x[0].numel() * (1 - outliner_ratio))).values
-    print(f'iter {iteration} | outliner: {outliner}')
+    # print(f'iter {iteration} | outliner: {outliner}')
     
     if len(x.shape) == 4:
         batch, num_head, seq_len, sep_dim = x.shape
@@ -199,6 +225,6 @@ def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_o
 
 def get_statistics_softmax(x: torch.Tensor, iteration: int, outliner_ratio: float):
     outliner = torch.kthvalue(x[0].flatten(), int(x[0].numel() * (1 - outliner_ratio))).values
-    print(f'iter {iteration} | outliner: {outliner}')
+    # print(f'iter {iteration} | outliner: {outliner}')
     return outliner
     

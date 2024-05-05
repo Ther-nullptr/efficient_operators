@@ -1,6 +1,9 @@
 import torch
 from .compress_function import (
-    fake_divide_outliner_suboutlinear_svd,
+    true_divide_outliner_suboutlinear_svd_compress,
+    true_divide_outliner_suboutlinear_svd_decompress,
+    true_compress_softmax,
+    true_decompress_softmax,
     prune_softmax,
     get_statistics,
     get_statistics_softmax
@@ -24,6 +27,7 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
         static_value_2,
     ):
         result = x1 @ x2
+        num_heads = x1.shape[1]
         
         # we just need to use the first batch to calculate the outliner
         # for the value 1
@@ -40,17 +44,22 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
             max_norm_column_list_2 = static_value_2[1]
             scale_2 = static_value_2[2]
         
-        x1 = fake_divide_outliner_suboutlinear_svd(x1, outliner_1, max_norm_column_list_1, scale_1, rank, sub_outliner_bit_1, sub_outliner_ratio_1)
-        x2 = fake_divide_outliner_suboutlinear_svd(x2.mT, outliner_2, max_norm_column_list_2, scale_2, rank, sub_outliner_bit_2, sub_outliner_ratio_2).mT
-        
+        x1_outlier_compressed, x1_sub_outliner_compressed, scale1 = true_divide_outliner_suboutlinear_svd_compress(x1, outliner_1, scale_1, sub_outliner_bit_1, sub_outliner_ratio_1)
+        x2_outlier_compressed, x2_sub_outliner_compressed, scale2 = true_divide_outliner_suboutlinear_svd_compress(x2.mT, outliner_2, scale_2, sub_outliner_bit_2, sub_outliner_ratio_2)
+        ctx.sub_outliner_bit_1 = sub_outliner_bit_1
+        ctx.sub_outliner_bit_2 = sub_outliner_bit_2
+        ctx.num_heads = num_heads
         ctx.mark_non_differentiable(outliner_1, max_norm_column_list_1, outliner_2, max_norm_column_list_2)
-        
-        ctx.save_for_backward(x1, x2)
+        ctx.save_for_backward(x1_outlier_compressed, x1_sub_outliner_compressed, scale1, x2_outlier_compressed, x2_sub_outliner_compressed, scale2)
+
         return result, outliner_1, max_norm_column_list_1, scale_1, outliner_2, max_norm_column_list_2, scale_2
             
     def backward(ctx, grad_output, grad_outliner_1, grad_max_norm_column_list_1, grad_scale_1, grad_outliner_2, grad_max_norm_column_list_2, grad_scale_2):
-        x1, x2 = ctx.saved_tensors
+        x1_outlier_compressed, x1_sub_outliner_compressed, scale1, x2_outlier_compressed, x2_sub_outliner_compressed, scale2 = ctx.saved_tensors
         grad_input1, grad_input2 = None, None
+        
+        x1 = true_divide_outliner_suboutlinear_svd_decompress(x1_outlier_compressed, x1_sub_outliner_compressed, ctx.sub_outliner_bit_1, scale1, True, ctx.num_heads)
+        x2 = true_divide_outliner_suboutlinear_svd_decompress(x2_outlier_compressed, x2_sub_outliner_compressed, ctx.sub_outliner_bit_2, scale2, True, ctx.num_heads).mT
 
         grad_input1 = grad_output @ x2.transpose(-2, -1)
         grad_input2 = x1.transpose(-2, -1) @ grad_output
@@ -166,6 +175,7 @@ class EfficientMemoryGEMMWithSoftmaxFunc(torch.autograd.Function):
         static_value_2,
     ):
         result = x1 @ x2
+        num_heads = x1.shape[1]
         
         # we just need to use the first batch to calculate the outliner
         # for the value 1
@@ -179,18 +189,21 @@ class EfficientMemoryGEMMWithSoftmaxFunc(torch.autograd.Function):
             max_norm_column_list_2 = static_value_2[1]
             scale_2 = static_value_2[2]
         
-        x1 = prune_softmax(x1, outliner_1)
-        x2 = fake_divide_outliner_suboutlinear_svd(x2, outliner_2, max_norm_column_list_2, scale_2, rank, sub_outliner_bit_2)
+        x1_sparse = true_compress_softmax(x1, outliner_1)
+        x2_outlier_compressed, x2_sub_outliner_compressed, scale_2 = true_divide_outliner_suboutlinear_svd_compress(x2, outliner_2, scale_2, sub_outliner_bit_2, sub_outliner_ratio_2)
         
         ctx.mark_non_differentiable(outliner_1, outliner_2, max_norm_column_list_2, scale_2)
-        
-        ctx.save_for_backward(x1, x2)
+        ctx.save_for_backward(x1_sparse, x2_outlier_compressed, x2_sub_outliner_compressed, scale_2)
+        ctx.sub_outliner_bit_2 = sub_outliner_bit_2
+        ctx.num_heads = num_heads
         return result, outliner_1, outliner_2, max_norm_column_list_2, scale_2
             
     def backward(ctx, grad_output, grad_outliner_1, grad_outliner_2, grad_max_norm_column_list_2, grad_scale_2):
-        x1, x2 = ctx.saved_tensors
+        x1_sparse, x2_outlier_compressed, x2_sub_outliner_compressed, scale_2 = ctx.saved_tensors
         grad_input1, grad_input2 = None, None
-
+        
+        x1 = true_decompress_softmax(x1_sparse)
+        x2 = true_divide_outliner_suboutlinear_svd_decompress(x2_outlier_compressed, x2_sub_outliner_compressed, ctx.sub_outliner_bit_2, scale_2, True, ctx.num_heads)
         grad_input1 = grad_output @ x2.transpose(-2, -1)
         grad_input2 = x1.transpose(-2, -1) @ grad_output
 

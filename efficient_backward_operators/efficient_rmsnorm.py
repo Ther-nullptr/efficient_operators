@@ -3,7 +3,8 @@ import torch
 import triton
 import triton.language as tl
 from .compress_function import (
-    fake_divide_outliner_suboutlinear_svd,
+    true_divide_outliner_suboutlinear_svd_compress,
+    true_divide_outliner_suboutlinear_svd_decompress,
     get_statistics
 )
 
@@ -197,20 +198,22 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
             max_norm_column_list = static_value[1]
             scale = static_value[2]
             
-        x = fake_divide_outliner_suboutlinear_svd(x, outliner, max_norm_column_list, scale, rank, sub_outliner_bit, sub_outliner_ratio)
+        x_outlier_compressed, x_sub_outliner_compressed, scale = true_divide_outliner_suboutlinear_svd_compress(x, outliner, scale, sub_outliner_bit, sub_outliner_ratio)
         
         ctx.mark_non_differentiable(outliner, max_norm_column_list)
-        ctx.save_for_backward(x, weight, mean, rstd)
+        ctx.save_for_backward(x_outlier_compressed, x_sub_outliner_compressed, scale, weight, mean, rstd)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps
         ctx.eps = eps
+        ctx.sub_outliner_bit = sub_outliner_bit
+        
         y = y.contiguous()
-
         return y, outliner, max_norm_column_list, scale
 
     @staticmethod
     def backward(ctx, dy, grad_outliner, grad_max_norm_column_list, grad_scale):
-        x, w, m, v = ctx.saved_tensors
+        x_outlier_compressed, x_sub_outliner_compressed, scale, w, m, v = ctx.saved_tensors
+        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale)
         dx, dw = None, None
 
         # heuristics for amount of parallel reduction stream for DW/DB

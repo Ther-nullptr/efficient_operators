@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 from .compress_function import (
     prune_softmax,
+    true_compress_softmax,
+    true_decompress_softmax,
     get_statistics_softmax
 )
 
@@ -22,16 +24,17 @@ class EfficientMemorySoftmaxFunc(torch.autograd.Function):
         else:
             outliner = static_value
 
-        y = prune_softmax(y, outliner)
+        y_sparse = true_compress_softmax(y, outliner)
         
         ctx.mark_non_differentiable(outliner)
-        ctx.save_for_backward(y)
+        ctx.save_for_backward(y_sparse)
         
         return y_return, outliner
 
     @staticmethod
     def backward(ctx, grad_output, grad_outliner):
-        (y,) = ctx.saved_tensors
+        (y_sparse,)  = ctx.saved_tensors
+        y = true_decompress_softmax(y_sparse)
 
         return (
             (grad_output - (grad_output * y).sum(dim=-1, keepdims=True)) * y,

@@ -1,7 +1,8 @@
 import torch
 import bitsandbytes.functional as F
 from .compress_function import (
-    fake_divide_outliner_suboutlinear_svd,
+    true_divide_outliner_suboutlinear_svd_compress,
+    true_divide_outliner_suboutlinear_svd_decompress,
     get_statistics
 )
 
@@ -41,17 +42,19 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
             max_norm_column_list = static_value[1]
             scale = static_value[2]
             
-        x = fake_divide_outliner_suboutlinear_svd(x, outliner, max_norm_column_list, scale, rank, sub_outliner_bit, sub_outliner_ratio)
+        x_outlier_compressed, x_sub_outliner_compressed, scale = true_divide_outliner_suboutlinear_svd_compress(x, outliner, scale, sub_outliner_bit, sub_outliner_ratio)
         
         ctx.mark_non_differentiable(outliner, max_norm_column_list)
-        ctx.save_for_backward(x, w)
+        ctx.save_for_backward(x_outlier_compressed, x_sub_outliner_compressed, scale, w)
+        ctx.sub_outliner_bit = sub_outliner_bit
         
         return output, outliner, max_norm_column_list, scale
 
     @staticmethod
     def backward(ctx, grad_output, grad_outliner, grad_max_norm_column_list, grad_scale):
         use_bias = ctx.use_bias
-        x, w = ctx.saved_tensors
+        x_outlier_compressed, x_sub_outliner_compressed, scale, w = ctx.saved_tensors
+        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale)
 
         grad_input = grad_weight = grad_bias = None
         grad_input = grad_output @ w
