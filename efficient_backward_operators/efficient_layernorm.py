@@ -208,6 +208,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
         outliner_ratio,
         sub_outliner_ratio,
         sub_outliner_bit,
+        sub_outlier_quantize_method,
         rank, 
         weight,
         bias,
@@ -247,7 +248,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
         
         # we just need to use the first batch to calculate the outliner
         if iteration < 10:
-            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit)
+            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
             # inorder to mark save_for_backward, we should convert the tensor
             max_norm_column_list = torch.tensor(max_norm_column_list)
         else:
@@ -328,7 +329,7 @@ class EfficientMemoryLayerNormFunc(torch.autograd.Function):
             BLOCK_SIZE_N=128,
         )
 
-        return dx, None, None, None, None, None, None, None, None, None, None, None
+        return dx, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
@@ -341,6 +342,7 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
         outliner_ratio: float = 0.01,
         sub_outliner_ratio: float = 0.2, #! initialize
         sub_outliner_bit: int = 8,
+        sub_outlier_quantize_method: str = 'per-tensor',
         rank: int = 16,
     ):
         super(EfficientMemoryLayerNorm, self).__init__(
@@ -349,6 +351,7 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
         self.outliner_ratio = outliner_ratio
         self.sub_outliner_ratio = sub_outliner_ratio
         self.sub_outliner_bit = sub_outliner_bit
+        self.sub_outlier_quantize_method = sub_outlier_quantize_method
         self.rank = rank
         self.iteration = 0
         self.static_value = [None, None, None]
@@ -360,6 +363,7 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
             self.outliner_ratio,
             self.sub_outliner_ratio,
             self.sub_outliner_bit,
+            self.sub_outlier_quantize_method,
             self.rank, 
             self.weight,
             self.bias,

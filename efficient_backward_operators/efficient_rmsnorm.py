@@ -152,6 +152,7 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
         outliner_ratio,
         sub_outliner_ratio,
         sub_outliner_bit,
+        sub_outlier_quantize_method,
         rank, 
         weight,
         bias,
@@ -276,6 +277,7 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
         outliner_ratio: float = 0.01,
         sub_outliner_ratio: float = 0.2, #! initialize
         sub_outliner_bit: int = 8,
+        sub_outlier_quantize_method: str = 'per-tensor',
         rank: int = 16,
     ):
         super(EfficientMemoryRMSNorm, self).__init__(
@@ -284,6 +286,7 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
         self.outliner_ratio = outliner_ratio
         self.sub_outliner_ratio = sub_outliner_ratio
         self.sub_outliner_bit = sub_outliner_bit
+        self.sub_outlier_quantize_method = sub_outlier_quantize_method
         self.rank = rank
         self.iteration = 0
         self.static_value = [None, None, None]
@@ -295,6 +298,7 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
             self.outliner_ratio,
             self.sub_outliner_ratio,
             self.sub_outliner_bit,
+            self.sub_outlier_quantize_method,
             self.rank, 
             self.weight,
             self.bias,

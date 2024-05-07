@@ -15,6 +15,7 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
         outliner_ratio,
         sub_outliner_ratio,
         sub_outliner_bit,
+        sub_outlier_quantize_method,
         rank, 
         iteration,
         static_value,
@@ -23,7 +24,7 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
         
         # we just need to use the first batch to calculate the outliner
         if iteration < 10:
-            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit)
+            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
             # inorder to mark save_for_backward, we should convert the tensor
             max_norm_column_list = torch.tensor(max_norm_column_list)
         else:
@@ -47,7 +48,7 @@ class EfficientMemorySiLUFunc(torch.autograd.Function):
         sigmoid = F.sigmoid(x)
         grad_input = sigmoid * (1 + x - x * sigmoid) * grad_output
 
-        return grad_input, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None
 
 
 class EfficientMemorySiLU(torch.nn.Module):
@@ -56,12 +57,14 @@ class EfficientMemorySiLU(torch.nn.Module):
         outliner_ratio: float = 0.01,
         sub_outliner_ratio: float = 0.2, #! initialize
         sub_outliner_bit: int = 8,
+        sub_outlier_quantize_method: str = 'per-tensor',
         rank: int = 16,
     ):
         super(EfficientMemorySiLU, self).__init__()
         self.outliner_ratio = outliner_ratio
         self.sub_outliner_ratio = sub_outliner_ratio
         self.sub_outliner_bit = sub_outliner_bit
+        self.sub_outlier_quantize_method = sub_outlier_quantize_method
         self.rank = rank
         self.iteration = 0
         self.static_value = [None, None, None]
@@ -72,6 +75,7 @@ class EfficientMemorySiLU(torch.nn.Module):
             self.outliner_ratio,
             self.sub_outliner_ratio,
             self.sub_outliner_bit,
+            self.sub_outlier_quantize_method,
             self.rank,
             self.iteration,
             self.static_value,

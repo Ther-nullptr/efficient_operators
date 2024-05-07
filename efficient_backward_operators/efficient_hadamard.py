@@ -14,9 +14,11 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
         outliner_ratio_1,
         sub_outliner_ratio_1,
         sub_outliner_bit_1,
+        sub_outlier_quantize_method_1,
         outliner_ratio_2,
         sub_outliner_ratio_2,
         sub_outliner_bit_2,
+        sub_outlier_quantize_method_2,
         rank, 
         iteration,
         static_value_1,
@@ -27,8 +29,8 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
         # we just need to use the first batch to calculate the outliner
         # for the value 1
         if iteration < 10:
-            outliner_1, max_norm_column_list_1, scale_1 = get_statistics(x1, iteration, outliner_ratio_1, sub_outliner_ratio_1, sub_outliner_bit_1)
-            outliner_2, max_norm_column_list_2, scale_2 = get_statistics(x2, iteration, outliner_ratio_2, sub_outliner_ratio_2, sub_outliner_bit_2)
+            outliner_1, max_norm_column_list_1, scale_1 = get_statistics(x1, iteration, outliner_ratio_1, sub_outliner_ratio_1, sub_outliner_bit_1, sub_outlier_quantize_method_1)
+            outliner_2, max_norm_column_list_2, scale_2 = get_statistics(x2, iteration, outliner_ratio_2, sub_outliner_ratio_2, sub_outliner_bit_2, sub_outlier_quantize_method_2)
             max_norm_column_list_1 = torch.tensor(max_norm_column_list_1)
             max_norm_column_list_2 = torch.tensor(max_norm_column_list_2)
         else:
@@ -70,6 +72,8 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
             None
         )
 
@@ -80,18 +84,22 @@ class EfficientMemoryHadamard(torch.nn.Module):
         outliner_ratio_1: float = 0.01,
         sub_outliner_ratio_1: float = 0.2,
         sub_outliner_bit_1: int = 8,
+        sub_outlier_quantize_method_1: str = 'per-tensor',
         outliner_ratio_2: float = 0.01,
         sub_outliner_ratio_2: float = 0.2,
         sub_outliner_bit_2: int = 8,
+        sub_outlier_quantize_method_2: str = 'per-tensor',
         rank: int = 16,
     ):
         super(EfficientMemoryHadamard, self).__init__()
         self.outliner_ratio_1 = outliner_ratio_1
         self.sub_outliner_ratio_1 = sub_outliner_ratio_1
         self.sub_outliner_bit_1 = sub_outliner_bit_1
+        self.sub_outlier_quantize_method_1 = sub_outlier_quantize_method_1
         self.outliner_ratio_2 = outliner_ratio_2
         self.sub_outliner_ratio_2 = sub_outliner_ratio_2
         self.sub_outliner_bit_2 = sub_outliner_bit_2
+        self.sub_outlier_quantize_method_2 = sub_outlier_quantize_method_2
         self.rank = rank
         self.iteration = 0
         self.static_value_1 = [None, None, None]
@@ -104,9 +112,11 @@ class EfficientMemoryHadamard(torch.nn.Module):
             self.outliner_ratio_1,
             self.sub_outliner_ratio_1,
             self.sub_outliner_bit_1,
+            self.sub_outlier_quantize_method_1,
             self.outliner_ratio_2,
             self.sub_outliner_ratio_2,
             self.sub_outliner_bit_2,
+            self.sub_outlier_quantize_method_2,
             self.rank,
             self.iteration,
             self.static_value_1,
