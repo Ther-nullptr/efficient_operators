@@ -14,15 +14,13 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
     def forward(
         ctx,
         x1,
+        R1,
+        Rinv1,
         x2,
+        R2,
+        Rinv2,
         outliner_ratio_1,
-        sub_outliner_ratio_1,
-        sub_outliner_bit_1,
-        sub_outlier_quantize_method_1,
         outliner_ratio_2,
-        sub_outliner_ratio_2,
-        sub_outliner_bit_2,
-        sub_outlier_quantize_method_2,
         rank,
         iteration,
         static_value_1,
@@ -34,22 +32,18 @@ class EfficientMemoryGEMMFunc(torch.autograd.Function):
         # we just need to use the first batch to calculate the outliner
         # for the value 1
         if iteration < 10:
-            outliner_1, max_norm_column_list_1, scale_1 = get_statistics(x1, iteration, outliner_ratio_1, sub_outliner_ratio_1, sub_outliner_bit_1, sub_outlier_quantize_method_1)
-            outliner_2, max_norm_column_list_2, scale_2 = get_statistics(x2.mT, iteration, outliner_ratio_2, sub_outliner_ratio_2, sub_outliner_bit_2, sub_outlier_quantize_method_2)
-            max_norm_column_list_1 = torch.tensor(max_norm_column_list_1)
-            max_norm_column_list_2 = torch.tensor(max_norm_column_list_2)
+            outliner_1, max_norm_column_list_1, scale_1 = get_statistics(x1, outliner_ratio_1, rank)
+            outliner_2, max_norm_column_list_2, scale_2 = get_statistics(x2.mT, outliner_ratio_2, rank)
         else:
-            outliner_1 = static_value_1[0]
-            max_norm_column_list_1 = static_value_1[1]
-            scale_1 = static_value_1[2]
-            outliner_2 = static_value_2[0]
-            max_norm_column_list_2 = static_value_2[1]
-            scale_2 = static_value_2[2]
+            outliner_1 = static_value_1
+            outliner_2 = static_value_2
         
-        x1_outlier_compressed, x1_sub_outliner_compressed, scale1 = true_divide_outliner_suboutlinear_svd_compress(x1, outliner_1, scale_1, sub_outliner_bit_1, sub_outliner_ratio_1)
-        x2_outlier_compressed, x2_sub_outliner_compressed, scale2 = true_divide_outliner_suboutlinear_svd_compress(x2.mT, outliner_2, scale_2, sub_outliner_bit_2, sub_outliner_ratio_2)
-        ctx.sub_outliner_bit_1 = sub_outliner_bit_1
-        ctx.sub_outliner_bit_2 = sub_outliner_bit_2
+        execute_svd = (iteration % 50) == 0
+        if execute_svd:
+            print(f"execute_svd at iteration {iteration}")
+        
+        x1_outlier_compressed, L1, R1, Rinv1 = true_divide_outliner_suboutlinear_svd_compress(x1, outliner_1, scale_1, sub_outliner_bit_1, sub_outliner_ratio_1)
+        x2_outlier_compressed, L2, R2, Rinv2 = true_divide_outliner_suboutlinear_svd_compress(x2.mT, outliner_2, scale_2, sub_outliner_bit_2, sub_outliner_ratio_2)
         ctx.num_heads = num_heads
         ctx.mark_non_differentiable(outliner_1, max_norm_column_list_1, outliner_2, max_norm_column_list_2)
         ctx.save_for_backward(x1_outlier_compressed, x1_sub_outliner_compressed, scale1, x2_outlier_compressed, x2_sub_outliner_compressed, scale2)
