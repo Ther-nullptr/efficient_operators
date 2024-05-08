@@ -191,7 +191,7 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
 
         # we just need to use the first batch to calculate the outliner
         if iteration < 10:
-            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit)
+            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
             # inorder to mark save_for_backward, we should convert the tensor
             max_norm_column_list = torch.tensor(max_norm_column_list)
         else:

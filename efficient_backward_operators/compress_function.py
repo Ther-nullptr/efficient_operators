@@ -201,7 +201,6 @@ def true_decompress_softmax(x_sparse: torch.Tensor):
 
 def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_outliner_ratio: float, sub_outliner_bit: int = 8, sub_outlier_quantize_method: str = 'per-tensor'):
     outliner = torch.kthvalue(x[0].flatten(), int(x[0].numel() * (1 - outliner_ratio))).values
-    # print(f'iter {iteration} | outliner: {outliner}')
     
     if len(x.shape) == 4:
         batch, num_head, seq_len, sep_dim = x.shape
@@ -221,10 +220,10 @@ def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_o
             scale = (x_sub_outliner.max() - x_sub_outliner.min()) / (2 ** sub_outliner_bit)
         elif sub_outlier_quantize_method == 'per-channel':
             # channel dimension: -2
-            scale = (x_sub_outliner.max(dim=-2).values - x_sub_outliner.min(dim=-2).values) / (2 ** sub_outliner_bit)
+            scale = (x_sub_outliner.max(dim=-2, keepdim=True).values - x_sub_outliner.min(dim=-2, keepdim=True).values) / (2 ** sub_outliner_bit)
         elif sub_outlier_quantize_method == 'per-token':
             # token dimension: -1
-            scale = (x_sub_outliner.max(dim=-1).values - x_sub_outliner.min(dim=-1).values) / (2 ** sub_outliner_bit)
+            scale = (x_sub_outliner.max(dim=-1, keepdim=True).values - x_sub_outliner.min(dim=-1, keepdim=True).values) / (2 ** sub_outliner_bit)
         else:
             raise "Unsupport Quantize Method"
     else:
