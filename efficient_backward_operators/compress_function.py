@@ -105,76 +105,36 @@ def fake_divide_outliner_suboutlinear_svd(x: torch.Tensor, outliner: float, max_
     return x
 
 
-def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: float, scale: float, sub_outliner_bit: int = 8, sub_outliner_ratio: float = 1.):
+def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: float, execute_svd = False, R = None, R_inv = None, svd_rank = 16):
     is_head = len(x.shape) == 4
     if is_head:
-        num_heads = x.shape[1]
         x = head_to_hidden_shape(x)
     
-    # step 1: prune the outliner
-    mask_1 = (x.abs() > outliner)
-    x_outliner = x * mask_1
-    x = x - x_outliner
-    # compress the x_outlier
-    x_outlier_compressed = x_outliner.to_sparse() # coo
-    del x_outliner
-    
-    # step 2: prune the suboutliner
-    if sub_outliner_ratio == 0.:
-        x_sub_outliner = 0.
-        x_sub_outliner_compressed = 0.
-        scale = 1.
-    else:
-        x_sub_outliner = x
-        assert (sub_outliner_bit % 2 == 0) or (sub_outliner_bit == 1), "Only support 2,4,8 bit quantization"
-        x_sub_outliner = torch.clamp(torch.round(x_sub_outliner / scale), min=-(2 ** (sub_outliner_bit - 1)), max=2 ** (sub_outliner_bit - 1) - 1)
-        # now the x_sub_outlier is int type, then we can use bit squeeze method
-        # since the shape is [bs, seq_len, hidden_dim], and hidden_dim is usually divisble by 8, so use hidden_dim dim to squeeze
-        hidden_dim = x_sub_outliner.shape[-1]
+    # step 1: exectue SVD or pruning
+    # L \approx X @ R^T, X_svd \approx L @ R = X @ R^T @ R
+    if execute_svd: 
+        U, S, Vh = torch.linalg.svd(x, full_matrices=False)
+        L = U[..., 0:svd_rank]
+        R = torch.diag(S)[..., 0:svd_rank, :] @ Vh
+        x_svd = L @ R
+    else: # use pervious base
+        L = x @ R_inv
+        x_svd = L @ R
         
-        if sub_outliner_bit == 8:
-            x_sub_outliner_compressed = x_sub_outliner.to(torch.int8)
-        elif sub_outliner_bit == 4:
-            # shift to positive
-            x_sub_outliner = (x_sub_outliner + 8).to(torch.uint8)
-            x_sub_outliner_compressed = x_sub_outliner[..., 0:(hidden_dim // 2)] + x_sub_outliner[..., (hidden_dim // 2):] * (2 ** 4)
-        elif sub_outliner_bit == 2:
-            x_sub_outliner = (x_sub_outliner + 2).to(torch.uint8)
-            x_sub_outliner_compressed = x_sub_outliner[..., ((hidden_dim // 4) * 3):hidden_dim] * (2 ** 6)
-            x_sub_outliner_compressed += x_sub_outliner[..., (hidden_dim // 2):((hidden_dim // 4) * 3)] * (2 ** 4)
-            x_sub_outliner_compressed += x_sub_outliner[..., (hidden_dim // 4):(hidden_dim // 2)] * (2 ** 2)
-            x_sub_outliner_compressed += x_sub_outliner[..., 0:(hidden_dim // 4)]
-        del x_sub_outliner
+    x_res = x - x_svd # the residual is usually more sparse...
+    mask_1 = (x_res.abs() > outliner)
+    x_outlier = x_res * mask_1
     
-    return x_outlier_compressed, x_sub_outliner_compressed, scale
+    # TODO: sparsify the x_outlier
+    x_outlier_compressed = x_outlier    
+    
+    return x_outlier_compressed, L, R
 
 
-def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, sub_outliner_bit, scale, is_head = False, num_heads = 1):
-    # step 1: decompress the outliers
-    x_outlier = x_outlier_compressed.to_dense()
-   
-    # step 2: decompress the sub_outliners
-    if sub_outliner_bit == 8:
-        # just return to the original value
-        x_sub_outliner = x_sub_outliner_compressed.to(x_outlier.dtype) * scale
-    elif sub_outliner_bit == 4:
-        x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 4)
-        x_sub_outliner_2nd = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 4)
-        x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd), dim=-1)
-        del x_sub_outliner_1st, x_sub_outliner_2nd
-        x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 8) * scale
-    elif sub_outliner_bit == 2:
-        x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 2)
-        x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 2)
-        x_sub_outliner_2nd = x_sub_outliner_compressed % (2 ** 2)
-        x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_2nd) // (2 ** 2)
-        x_sub_outliner_3rd = x_sub_outliner_compressed % (2 ** 2)
-        x_sub_outliner_4th = (x_sub_outliner_compressed - x_sub_outliner_3rd) // (2 ** 2)
-        x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th), dim=-1)
-        del x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th
-        x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 2) * scale
-        
-    x = x_outlier + x_sub_outliner
+def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, L, R, is_head = False, num_heads = 1):
+    # TODO: unsparsify the x_outlier
+    x_outlier = x_outlier_compressed
+    x = x_outlier + L @ R
 
     if is_head:
         x = hidden_to_head_shape(x, num_heads=num_heads)
