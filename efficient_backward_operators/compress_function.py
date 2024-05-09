@@ -200,13 +200,13 @@ def true_decompress_softmax(x_sparse: torch.Tensor):
   
 
 def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_outliner_ratio: float, sub_outliner_bit: int = 8, sub_outlier_quantize_method: str = 'per-tensor'):
-    outliner = torch.kthvalue(x[0].flatten(), int(x[0].numel() * (1 - outliner_ratio))).values
+    outliner = torch.kthvalue(x[0].flatten().to(torch.float32), int(x[0].numel() * (1 - outliner_ratio))).values
     
     if len(x.shape) == 4:
         batch, num_head, seq_len, sep_dim = x.shape
         x = x.permute(0, 2, 1, 3).reshape(batch, seq_len, num_head * sep_dim)
 
-    mean_norm = list(torch.mean(torch.abs(x[0]), dim=-2).cpu().detach().numpy())
+    mean_norm = list(torch.mean(torch.abs(x[0]).to(torch.float32), dim=-2).cpu().detach().numpy())
     max_norm_column_list = sorted(enumerate(mean_norm), key=lambda x: x[1], reverse=True)
     max_norm_column_list = [item[0] for item in max_norm_column_list]
     max_norm_column_list = sorted(max_norm_column_list[:int(len(max_norm_column_list) * sub_outliner_ratio)])

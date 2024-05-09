@@ -58,7 +58,9 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
         x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale)
 
         grad_input = grad_weight = grad_bias = None
+        grad_output = grad_output.to(w.dtype)
         grad_input = grad_output @ w
+        grad_output = grad_output.to(x.dtype)
         grad_weight = grad_output.transpose(-2, -1) @ x
         if use_bias:
             grad_bias = grad_output.sum(0)
