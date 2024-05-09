@@ -148,11 +148,10 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
     def forward(
         ctx,
         x,
+        R,
+        Rinv,
         normalized_shape,
         outliner_ratio,
-        sub_outliner_ratio,
-        sub_outliner_bit,
-        sub_outlier_quantize_method,
         rank, 
         weight,
         bias,
@@ -191,30 +190,28 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
 
         # we just need to use the first batch to calculate the outliner
         if iteration < 10:
-            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
-            # inorder to mark save_for_backward, we should convert the tensor
-            max_norm_column_list = torch.tensor(max_norm_column_list)
+            outliner = get_statistics(x, outliner_ratio, rank)
         else:
-            outliner = static_value[0]
-            max_norm_column_list = static_value[1]
-            scale = static_value[2]
-            
-        x_outlier_compressed, x_sub_outliner_compressed, scale = true_divide_outliner_suboutlinear_svd_compress(x, outliner, scale, sub_outliner_bit, sub_outliner_ratio)
+            outliner = static_value
+
+        execute_svd = (iteration % 50) == 0
+        if execute_svd:
+            print(f"execute_svd at iteration {iteration}")
+        x_outlier_compressed, L, R, Rinv = true_divide_outliner_suboutlinear_svd_compress(x, outliner, execute_svd, R, Rinv, rank)
         
-        ctx.mark_non_differentiable(outliner, max_norm_column_list)
-        ctx.save_for_backward(x_outlier_compressed, x_sub_outliner_compressed, scale, weight, mean, rstd)
+        ctx.mark_non_differentiable(outliner)
+        ctx.save_for_backward(x_outlier_compressed, L, R, weight, mean, rstd)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps
         ctx.eps = eps
-        ctx.sub_outliner_bit = sub_outliner_bit
         
         y = y.contiguous()
-        return y, outliner, max_norm_column_list, scale
+        return y, outliner, R, Rinv
 
     @staticmethod
-    def backward(ctx, dy, grad_outliner, grad_max_norm_column_list, grad_scale):
-        x_outlier_compressed, x_sub_outliner_compressed, scale, w, m, v = ctx.saved_tensors
-        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale)
+    def backward(ctx, dy, grad_outliner, grad_R, grad_Rinv):
+        x_outlier_compressed, L, R, w, m, v = ctx.saved_tensors
+        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, L, R)
         dx, dw = None, None
 
         # heuristics for amount of parallel reduction stream for DW/DB
@@ -264,7 +261,7 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
             BLOCK_SIZE_N=128,
         )
 
-        return dx, None, None, None, None, None, None, None, None, None, None, None
+        return dx, None, None, None, None, None, None, None, None, None, None
 
 
 class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
@@ -275,30 +272,25 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
         elementwise_affine=True,
         bias=True,
         outliner_ratio: float = 0.01,
-        sub_outliner_ratio: float = 0.2, #! initialize
-        sub_outliner_bit: int = 8,
-        sub_outlier_quantize_method: str = 'per-tensor',
         rank: int = 16,
     ):
         super(EfficientMemoryRMSNorm, self).__init__(
             normalized_shape, eps, elementwise_affine, bias
         )
         self.outliner_ratio = outliner_ratio
-        self.sub_outliner_ratio = sub_outliner_ratio
-        self.sub_outliner_bit = sub_outliner_bit
-        self.sub_outlier_quantize_method = sub_outlier_quantize_method
         self.rank = rank
         self.iteration = 0
-        self.static_value = [None, None, None]
+        self.static_value = None
+        self.R = None
+        self.Rinv = None
 
     def forward(self, x):
-        result, outliner, max_norm_column_list, scale = EfficientMemoryRMSNormFunc.apply(
+        result, outliner, R, Rinv = EfficientMemoryRMSNormFunc.apply(
             x,
+            self.R,
+            self.Rinv,
             self.normalized_shape,
             self.outliner_ratio,
-            self.sub_outliner_ratio,
-            self.sub_outliner_bit,
-            self.sub_outlier_quantize_method,
             self.rank, 
             self.weight,
             self.bias,
@@ -307,22 +299,14 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
             self.static_value,
         )
         
+        self.R = R
+        self.Rinv = Rinv
+        
         if self.iteration <= 10:
-            self.static_value[0] = (
+            self.static_value = (
                 outliner
-                if self.static_value[0] is None
-                else (self.iteration * self.static_value[0] + outliner)
-                / (self.iteration + 1)
-            )
-            self.static_value[1] = (
-                max_norm_column_list
-                if self.static_value[1] is None
-                else self.static_value[1]
-            )
-            self.static_value[2] = (
-                scale
-                if self.static_value[2] is None
-                else (self.iteration * self.static_value[2] + scale) 
+                if self.static_value is None
+                else (self.iteration * self.static_value + outliner)
                 / (self.iteration + 1)
             )
         self.iteration += 1

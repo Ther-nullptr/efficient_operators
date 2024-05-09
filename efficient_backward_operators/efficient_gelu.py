@@ -13,7 +13,7 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
         ctx,
         x,
         R,
-        R_inv,
+        Rinv,
         outliner_ratio,
         rank, 
         iteration,
@@ -30,15 +30,15 @@ class EfficientMemoryGELUFunc(torch.autograd.Function):
         execute_svd = (iteration % 50) == 0
         if execute_svd:
             print(f"execute_svd at iteration {iteration}")
-        x_outlier_compressed, L, R, R_inv = true_divide_outliner_suboutlinear_svd_compress(x, outliner, execute_svd, R, R_inv, rank)
+        x_outlier_compressed, L, R, Rinv = true_divide_outliner_suboutlinear_svd_compress(x, outliner, execute_svd, R, Rinv, rank)
         
         ctx.mark_non_differentiable(outliner)
         ctx.save_for_backward(x_outlier_compressed, L, R)
         
-        return result, outliner, R, R_inv
+        return result, outliner, R, Rinv
 
     @staticmethod
-    def backward(ctx, grad_output, grad_outliner, grad_R, grad_R_inv):
+    def backward(ctx, grad_output, grad_outliner, grad_R, grad_Rinv):
         (x_outlier_compressed, L, R) = ctx.saved_tensors
         x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, L, R)
 
@@ -64,44 +64,35 @@ class EfficientMemoryGELU(torch.nn.Module):
     def __init__(
         self,
         outliner_ratio: float = 0.01,
-        sub_outliner_ratio: float = 0.2, #! initialize
-        sub_outliner_bit: int = 8,
-        sub_outlier_quantize_method: str = 'per-tensor',
         rank: int = 16,
     ):
         super(EfficientMemoryGELU, self).__init__()
         self.outliner_ratio = outliner_ratio
-        self.sub_outliner_ratio = sub_outliner_ratio
-        self.sub_outliner_bit = sub_outliner_bit
-        self.sub_outlier_quantize_method = sub_outlier_quantize_method
         self.rank = rank
         self.iteration = 0
         self.static_value = None
         self.R = None
-        self.R_inv = None
+        self.Rinv = None
 
     def forward(self, input):
-        result, outliner, R, R_inv = EfficientMemoryGELUFunc.apply(
+        result, outliner, R, Rinv = EfficientMemoryGELUFunc.apply(
             input,
             self.R,
-            self.R_inv,
+            self.Rinv,
             self.outliner_ratio,
-            self.sub_outliner_ratio,
-            self.sub_outliner_bit,
-            self.sub_outlier_quantize_method,
             self.rank,
             self.iteration,
             self.static_value,
         )
         
         self.R = R
-        self.R_inv = R_inv
+        self.Rinv = Rinv
 
         if self.iteration <= 10:
             self.static_value = (
                 outliner
-                if self.static_value[0] is None
-                else (self.iteration * self.static_value[0] + outliner)
+                if self.static_value is None
+                else (self.iteration * self.static_value + outliner)
                 / (self.iteration + 1)
             )
         self.iteration += 1
