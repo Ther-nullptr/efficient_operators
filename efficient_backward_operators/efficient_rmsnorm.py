@@ -195,11 +195,9 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
             outliner = static_value
 
         execute_svd = (iteration % 50) == 0
-        if execute_svd:
-            print(f"execute_svd at iteration {iteration}")
         x_outlier_compressed, L, R, Rinv = true_divide_outliner_suboutlinear_svd_compress(x, outliner, execute_svd, R, Rinv, rank)
         
-        ctx.mark_non_differentiable(outliner)
+        ctx.mark_non_differentiable(outliner, R, Rinv)
         ctx.save_for_backward(x_outlier_compressed, L, R, weight, mean, rstd)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps

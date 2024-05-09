@@ -115,8 +115,7 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     if execute_svd: 
         U, S, Vh = torch.linalg.svd(x, full_matrices=False)
         L = U[..., 0:svd_rank]
-        print(torch.diag(S).shape, Vh.shape)
-        R = torch.diag(S)[..., 0:svd_rank, :] @ Vh
+        R = torch.diag_embed(S)[..., 0:svd_rank, :] @ Vh
         R_inv = torch.pinverse(R)
         x_svd = L @ R
     else: # use pervious base

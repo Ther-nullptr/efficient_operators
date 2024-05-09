@@ -34,13 +34,11 @@ class EfficientMemoryHadamardFunc(torch.autograd.Function):
             outliner_2 = static_value_2
             
         execute_svd = (iteration % 50) == 0
-        if execute_svd:
-            print(f"execute_svd at iteration {iteration}")
         
         x1_outlier_compressed, L1, R1, Rinv1 = true_divide_outliner_suboutlinear_svd_compress(x1, outliner_1, execute_svd, R1, Rinv1, rank)
         x2_outlier_compressed, L2, R2, Rinv2 = true_divide_outliner_suboutlinear_svd_compress(x2, outliner_2, execute_svd, R2, Rinv2, rank)
         
-        ctx.mark_non_differentiable(outliner_1, outliner_2)
+        ctx.mark_non_differentiable(outliner_1, outliner_2, R1, Rinv1, R2, Rinv2)
         ctx.save_for_backward(x1_outlier_compressed, L1, R1, x2_outlier_compressed, L2, R2)
 
         return result, outliner_1, R1, Rinv1, outliner_2, R2, Rinv2
@@ -113,13 +111,13 @@ class EfficientMemoryHadamard(torch.nn.Module):
         if self.iteration <= 10:
             self.static_value_1 = (
                 outliner_1
-                if self.static_value_1[0] is None
+                if self.static_value_1 is None
                 else (self.iteration * self.static_value_1 + outliner_1)
                 / (self.iteration + 1)
             )
             self.static_value_2 = (
                 outliner_2
-                if self.static_value_2[0] is None
+                if self.static_value_2 is None
                 else (self.iteration * self.static_value_2 + outliner_2)
                 / (self.iteration + 1)
             )
