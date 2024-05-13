@@ -191,30 +191,29 @@ class EfficientMemoryRMSNormFunc(torch.autograd.Function):
 
         # we just need to use the first batch to calculate the outliner
         if iteration < 10:
-            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
-            # inorder to mark save_for_backward, we should convert the tensor
-            max_norm_column_list = torch.tensor(max_norm_column_list)
+            outliner, L, R, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
         else:
             outliner = static_value[0]
-            max_norm_column_list = static_value[1]
+            L = static_value[1]
             scale = static_value[2]
+            R = static_value[3]
             
-        x_outlier_compressed, x_sub_outliner_compressed, scale = true_divide_outliner_suboutlinear_svd_compress(x, outliner, scale, sub_outliner_bit, sub_outliner_ratio)
+        x_outlier_compressed, x_sub_outliner_compressed, scale = true_divide_outliner_suboutlinear_svd_compress(x, outliner, scale, sub_outliner_bit, sub_outliner_ratio, L, R)
         
-        ctx.mark_non_differentiable(outliner, max_norm_column_list)
-        ctx.save_for_backward(x_outlier_compressed, x_sub_outliner_compressed, scale, weight, mean, rstd)
+        ctx.mark_non_differentiable(outliner, L, R, scale)
+        ctx.save_for_backward(x_outlier_compressed, x_sub_outliner_compressed, scale, weight, mean, rstd, L, R)
         ctx.BLOCK_SIZE = BLOCK_SIZE
         ctx.num_warps = num_warps
         ctx.eps = eps
         ctx.sub_outliner_bit = sub_outliner_bit
         
         y = y.contiguous()
-        return y, outliner, max_norm_column_list, scale
+        return y, outliner, L, R, scale
 
     @staticmethod
-    def backward(ctx, dy, grad_outliner, grad_max_norm_column_list, grad_scale):
-        x_outlier_compressed, x_sub_outliner_compressed, scale, w, m, v = ctx.saved_tensors
-        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale)
+    def backward(ctx, dy, grad_outliner, grad_L, grad_R, grad_scale):
+        x_outlier_compressed, x_sub_outliner_compressed, scale, w, m, v, L, R = ctx.saved_tensors
+        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale, L=L, R=R)
         dx, dw = None, None
 
         # heuristics for amount of parallel reduction stream for DW/DB
@@ -289,10 +288,10 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
         self.sub_outlier_quantize_method = sub_outlier_quantize_method
         self.rank = rank
         self.iteration = 0
-        self.static_value = [None, None, None]
+        self.static_value = [None, None, None, None]
 
     def forward(self, x):
-        result, outliner, max_norm_column_list, scale = EfficientMemoryRMSNormFunc.apply(
+        result, outliner, L, R, scale = EfficientMemoryRMSNormFunc.apply(
             x,
             self.normalized_shape,
             self.outliner_ratio,
@@ -315,14 +314,21 @@ class EfficientMemoryRMSNorm(torch.nn.LayerNorm):
                 / (self.iteration + 1)
             )
             self.static_value[1] = (
-                max_norm_column_list
+                L
                 if self.static_value[1] is None
-                else self.static_value[1]
+                else (self.iteration * self.static_value[1] + L) 
+                / (self.iteration + 1)
             )
             self.static_value[2] = (
                 scale
                 if self.static_value[2] is None
                 else (self.iteration * self.static_value[2] + scale) 
+                / (self.iteration + 1)
+            )
+            self.static_value[3] = (
+                R
+                if self.static_value[3] is None
+                else (self.iteration * self.static_value[3] + R) 
                 / (self.iteration + 1)
             )
         self.iteration += 1

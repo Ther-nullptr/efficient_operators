@@ -105,7 +105,7 @@ def fake_divide_outliner_suboutlinear_svd(x: torch.Tensor, outliner: float, max_
     return x
 
 
-def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: float, scale: float, sub_outliner_bit: int = 8, sub_outliner_ratio: float = 1.):
+def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: float, scale: float, sub_outliner_bit: int = 8, sub_outliner_ratio: float = 1., L: torch.Tensor = None, R: torch.Tensor = None):
     is_head = len(x.shape) == 4
     if is_head:
         num_heads = x.shape[1]
@@ -119,7 +119,10 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     x_outlier_compressed = x_outliner.to_sparse() # coo
     del x_outliner
     
-    # step 2: prune the suboutliner
+    # step 2: substract the svd base
+    x = x - (L @ R)
+    
+    # step 3: quantize the suboutliner
     if sub_outliner_ratio == 0.:
         x_sub_outliner = 0.
         x_sub_outliner_compressed = 0.
@@ -153,11 +156,14 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     return x_outlier_compressed, x_sub_outliner_compressed, scale
 
 
-def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, sub_outliner_bit, scale, is_head = False, num_heads = 1):
+def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, sub_outliner_bit, scale, is_head = False, num_heads = 1, L = None, R = None):
     # step 1: decompress the outliers
     x_outlier = x_outlier_compressed.to_dense()
+    
+    # step 2: add the base
+    x = x_outlier + L @ R
    
-    # step 2: decompress the sub_outliners
+    # step 3: decompress the sub_outliners
     if sub_outliner_bit == 16:
         x_sub_outliner = x_sub_outliner_compressed
     elif sub_outliner_bit == 8:
@@ -180,7 +186,7 @@ def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub
         del x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th
         x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 2) * scale
         
-    x = x_outlier + x_sub_outliner
+    x = x + x_sub_outliner
 
     if is_head:
         x = hidden_to_head_shape(x, num_heads=num_heads)
@@ -205,22 +211,26 @@ def true_decompress_softmax(x_sparse: torch.Tensor):
     return x_sparse.to_dense()
   
 
-def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_outliner_ratio: float, sub_outliner_bit: int = 8, sub_outlier_quantize_method: str = 'per-tensor'):
+def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_outliner_ratio: float, sub_outliner_bit: int = 8, sub_outlier_quantize_method: str = 'per-tensor', svd_rank: int = 16):
     outliner = torch.kthvalue(x[0].flatten().to(torch.float32), int(x[0].numel() * (1 - outliner_ratio))).values
+    x_outliner = x[0] * (x[0].abs() > outliner)
+    x = x - x_outliner
     
     if len(x.shape) == 4:
         batch, num_head, seq_len, sep_dim = x.shape
         x = x.permute(0, 2, 1, 3).reshape(batch, seq_len, num_head * sep_dim)
 
-    mean_norm = list(torch.mean(torch.abs(x[0]).to(torch.float32), dim=-2).cpu().detach().numpy())
-    max_norm_column_list = sorted(enumerate(mean_norm), key=lambda x: x[1], reverse=True)
-    max_norm_column_list = [item[0] for item in max_norm_column_list]
-    max_norm_column_list = sorted(max_norm_column_list[:int(len(max_norm_column_list) * sub_outliner_ratio)])
+    U, S, Vh = torch.linalg.svd(x[0], full_matrices=False)
+    L = U[..., 0:svd_rank]
+    R = torch.diag(S)[..., 0:svd_rank, :] @ Vh
 
-    x_outliner = x[0] * (x[0].abs() > outliner)
-    x = x - x_outliner
+    # or:
+    # L = U @ (torch.sqrt(torch.diag(S)[:, 0:reduced_rank]))
+    # R = torch.sqrt(torch.diag(S)[0:reduced_rank, :]) @ Vh
+    x = x - (L @ R)
+    
     if sub_outliner_ratio > 0 and sub_outliner_bit != 16:
-        x_sub_outliner = x[0][:, max_norm_column_list]
+        x_sub_outliner = x[0]
         if sub_outlier_quantize_method == 'per-tensor':
             # TODO: set the scale factor to per channel or per tensor?
             scale = (x_sub_outliner.max() - x_sub_outliner.min()) / (2 ** sub_outliner_bit)
@@ -234,7 +244,7 @@ def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_o
             raise "Unsupport Quantize Method"
     else:
         scale = 0
-    return outliner, max_norm_column_list, scale
+    return outliner, L, R, scale
 
 
 def get_statistics_softmax(x: torch.Tensor, iteration: int, outliner_ratio: float):

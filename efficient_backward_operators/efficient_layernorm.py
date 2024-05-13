@@ -354,7 +354,7 @@ class EfficientMemoryLayerNorm(torch.nn.LayerNorm):
         self.sub_outlier_quantize_method = sub_outlier_quantize_method
         self.rank = rank
         self.iteration = 0
-        self.static_value = [None, None, None]
+        self.static_value = [None, None, None, None]
 
     def forward(self, x):
         result, outliner, max_norm_column_list, scale = EfficientMemoryLayerNormFunc.apply(

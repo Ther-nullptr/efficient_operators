@@ -35,27 +35,26 @@ class EfficientMemoryLinearFunc(torch.autograd.Function):
         
         # we just need to use the first batch to calculate the outliner
         if iteration < 10:
-            outliner, max_norm_column_list, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
-            # inorder to mark save_for_backward, we should convert the tensor
-            max_norm_column_list = torch.tensor(max_norm_column_list)
+            outliner, L, R, scale = get_statistics(x, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
         else:
             outliner = static_value[0]
-            max_norm_column_list = static_value[1]
+            L = static_value[1]
             scale = static_value[2]
+            R = static_value[3]
             
-        x_outlier_compressed, x_sub_outliner_compressed, scale = true_divide_outliner_suboutlinear_svd_compress(x, outliner, scale, sub_outliner_bit, sub_outliner_ratio)
+        x_outlier_compressed, x_sub_outliner_compressed, scale = true_divide_outliner_suboutlinear_svd_compress(x, outliner, scale, sub_outliner_bit, sub_outliner_ratio, L, R)
         
-        ctx.mark_non_differentiable(outliner, max_norm_column_list)
-        ctx.save_for_backward(x_outlier_compressed, x_sub_outliner_compressed, scale, w)
+        ctx.mark_non_differentiable(outliner, L, R, scale)
+        ctx.save_for_backward(x_outlier_compressed, x_sub_outliner_compressed, scale, w, L, R)
         ctx.sub_outliner_bit = sub_outliner_bit
         
-        return output, outliner, max_norm_column_list, scale
+        return output, outliner, L, R, scale
 
     @staticmethod
-    def backward(ctx, grad_output, grad_outliner, grad_max_norm_column_list, grad_scale):
+    def backward(ctx, grad_output, grad_outliner, grad_L, grad_R, grad_scale):
         use_bias = ctx.use_bias
-        x_outlier_compressed, x_sub_outliner_compressed, scale, w = ctx.saved_tensors
-        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale)
+        x_outlier_compressed, x_sub_outliner_compressed, scale, w, L, R = ctx.saved_tensors
+        x = true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, ctx.sub_outliner_bit, scale, L=L, R=R)
 
         grad_input = grad_weight = grad_bias = None
         grad_output = grad_output.to(w.dtype)
@@ -99,10 +98,10 @@ class EfficientMemoryLinear(torch.nn.Linear):
         self.sub_outlier_quantize_method = sub_outlier_quantize_method
         self.rank = rank
         self.iteration = 0
-        self.static_value = [None, None, None]
+        self.static_value = [None, None, None, None]
 
     def forward(self, input: torch.Tensor):
-        result, outliner, max_norm_column_list, scale = EfficientMemoryLinearFunc.apply(
+        result, outliner, L, R, scale = EfficientMemoryLinearFunc.apply(
             input,
             self.weight,
             self.bias,
@@ -124,14 +123,21 @@ class EfficientMemoryLinear(torch.nn.Linear):
                 / (self.iteration + 1)
             )
             self.static_value[1] = (
-                max_norm_column_list
+                L
                 if self.static_value[1] is None
-                else self.static_value[1]
+                else (self.iteration * self.static_value[1] + L) 
+                / (self.iteration + 1)
             )
             self.static_value[2] = (
                 scale
                 if self.static_value[2] is None
-                else (self.iteration * self.static_value[2] + scale) 
+                else (self.iteration * self.static_value[2] + scale)
+                / (self.iteration + 1)
+            )
+            self.static_value[3] = (
+                R
+                if self.static_value[3] is None
+                else (self.iteration * self.static_value[3] + R) 
                 / (self.iteration + 1)
             )
         self.iteration += 1
