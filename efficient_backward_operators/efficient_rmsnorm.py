@@ -55,7 +55,7 @@ def _rms_norm_fwd_fused(
         w = tl.load(W + cols, mask=mask)
         x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
         x_hat = (x) * rstd
-        y = x_hat * w
+        y = x_hat * (w + 1.0) #* GEMMA
         # Write output
         tl.store(Y + cols, y, mask=mask)
 
@@ -96,7 +96,7 @@ def _rms_norm_bwd_dx_fused(
     rstd = tl.load(Rstd + row)
     # Compute dx
     xhat = x * rstd
-    wdy = w * dy
+    wdy = (w + 1.) * dy
     xhat = tl.where(mask, xhat, 0.0)
     wdy = tl.where(mask, wdy, 0.0)
     c1 = tl.sum(xhat * wdy, axis=0) / N
