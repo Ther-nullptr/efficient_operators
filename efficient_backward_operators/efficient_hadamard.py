@@ -2,7 +2,8 @@ import torch
 from .compress_function import (
     true_divide_outliner_suboutlinear_svd_compress,
     true_divide_outliner_suboutlinear_svd_decompress,
-    get_statistics
+    get_statistics,
+    pad_cut_L
 )
 
 class EfficientMemoryHadamardFunc(torch.autograd.Function):
@@ -133,7 +134,7 @@ class EfficientMemoryHadamard(torch.nn.Module):
             self.static_value_1[1] = (
                 L_1
                 if self.static_value_1[1] is None
-                else (self.iteration * self.static_value_1[1] + L_1)
+                else (self.iteration * self.static_value_1[1] + pad_cut_L(L_1, self.static_value_1[1]))
                 / (self.iteration + 1)
             )
             self.static_value_1[2] = (
@@ -157,7 +158,7 @@ class EfficientMemoryHadamard(torch.nn.Module):
             self.static_value_2[1] = (
                 L_2
                 if self.static_value_2[1] is None
-                else (self.iteration * self.static_value_2[1] + L_2)
+                else (self.iteration * self.static_value_2[1] + pad_cut_L(L_2, self.static_value_2[1]))
                 / (self.iteration + 1)
             )
             self.static_value_2[2] = (

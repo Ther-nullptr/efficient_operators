@@ -6,7 +6,8 @@ from .compress_function import (
     true_decompress_softmax,
     prune_softmax,
     get_statistics,
-    get_statistics_softmax
+    get_statistics_softmax,
+    pad_cut_L
 )
 
 class EfficientMemoryGEMMFunc(torch.autograd.Function):
@@ -139,7 +140,7 @@ class EfficientMemoryGEMM(torch.nn.Module):
             self.static_value_1[1] = (
                 L_1
                 if self.static_value_1[1] is None
-                else (self.iteration * self.static_value_1[1] + L_1)
+                else (self.iteration * self.static_value_1[1] + pad_cut_L(L_1, self.static_value_1[1]))
                 / (self.iteration + 1)
             )
             self.static_value_1[2] = (
@@ -163,7 +164,7 @@ class EfficientMemoryGEMM(torch.nn.Module):
             self.static_value_2[1] = (
                 L_2
                 if self.static_value_2[1] is None
-                else (self.iteration * self.static_value_2[1] + L_2)
+                else (self.iteration * self.static_value_2[1] + pad_cut_L(L_2, self.static_value_2[1]))
                 / (self.iteration + 1)
             )
             self.static_value_2[2] = (
@@ -216,7 +217,7 @@ class EfficientMemoryGEMMWithSoftmaxFunc(torch.autograd.Function):
             R_2 = static_value_2[3]
         
         x1_sparse = true_compress_softmax(x1, outliner_1)
-        x2_outlier_compressed, x2_sub_outliner_compressed, scale_2 = true_divide_outliner_suboutlinear_svd_compress(x2, outliner_2, scale_2, sub_outliner_bit_2, sub_outliner_ratio_2)
+        x2_outlier_compressed, x2_sub_outliner_compressed, scale_2 = true_divide_outliner_suboutlinear_svd_compress(x2, outliner_2, scale_2, sub_outliner_bit_2, sub_outliner_ratio_2, L_2, R_2)
         
         ctx.mark_non_differentiable(outliner_1, outliner_2, L_2, R_2, scale_2)
         ctx.save_for_backward(x1_sparse, x2_outlier_compressed, x2_sub_outliner_compressed, scale_2, L_2, R_2)
@@ -300,7 +301,7 @@ class EfficientMemoryGEMMWithSoftmax(torch.nn.Module):
             self.static_value_2[1] = (
                 L_2
                 if self.static_value_2[1] is None
-                else (self.iteration * self.static_value_2[1] + L_2)
+                else (self.iteration * self.static_value_2[1] + pad_cut_L(L_2, self.static_value_2[1]))
                 / (self.iteration + 1)
             )
             self.static_value_2[2] = (

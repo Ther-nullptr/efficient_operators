@@ -120,7 +120,8 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     del x_outliner
     
     # step 2: substract the svd base
-    x = x - (L @ R)
+    tgt_L = torch.zeros((x.shape[-2], L.shape[-1]))
+    x = x - (pad_cut_L(L, tgt_L) @ R)
     
     # step 3: quantize the suboutliner
     if sub_outliner_ratio == 0.:
@@ -161,7 +162,8 @@ def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub
     x_outlier = x_outlier_compressed.to_dense()
     
     # step 2: add the base
-    x = x_outlier + L @ R
+    tgt_L = torch.zeros((x_outlier.shape[-2], L.shape[-1]))
+    x = x_outlier + pad_cut_L(L, tgt_L) @ R
    
     # step 3: decompress the sub_outliners
     if sub_outliner_bit == 16:
@@ -252,3 +254,14 @@ def get_statistics_softmax(x: torch.Tensor, iteration: int, outliner_ratio: floa
     # print(f'iter {iteration} | outliner: {outliner}')
     return outliner
     
+    
+def pad_cut_L(src_L, tgt_L):
+    # src_L: [seq_len_1, r]
+    # tgt_L: [seq_len_2, r]
+    seq_len_1, r = src_L.shape
+    seq_len_2, _ = tgt_L.shape
+    if seq_len_1 < seq_len_2:
+        src_L = torch.cat((src_L, torch.zeros(seq_len_2 - seq_len_1, r).to(src_L.device)), dim=0)
+    elif seq_len_1 > seq_len_2:
+        src_L = src_L[0:seq_len_2, :]
+    return src_L

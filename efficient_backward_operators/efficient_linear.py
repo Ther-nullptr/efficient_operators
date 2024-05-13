@@ -3,7 +3,8 @@ import bitsandbytes.functional as F
 from .compress_function import (
     true_divide_outliner_suboutlinear_svd_compress,
     true_divide_outliner_suboutlinear_svd_decompress,
-    get_statistics
+    get_statistics,
+    pad_cut_L
 )
 
 
@@ -125,7 +126,7 @@ class EfficientMemoryLinear(torch.nn.Linear):
             self.static_value[1] = (
                 L
                 if self.static_value[1] is None
-                else (self.iteration * self.static_value[1] + L) 
+                else (self.iteration * self.static_value[1] + pad_cut_L(L, self.static_value[1])) 
                 / (self.iteration + 1)
             )
             self.static_value[2] = (
