@@ -143,7 +143,7 @@ def _rms_norm_bwd_dwdb(
     tl.store(FINAL_DW + cols, sum_dw, mask=cols < N)
 
 
-class EfficientMemoryRMSNormGemmaFunc(torch.autograd.Function):
+class EfficientMemoryGemmaRMSNormFunc(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -267,7 +267,7 @@ class EfficientMemoryRMSNormGemmaFunc(torch.autograd.Function):
         return dx, None, None, None, None, None, None, dw, None, None, None, None
 
 
-class EfficientMemoryRMSNormGemma(torch.nn.LayerNorm):
+class EfficientMemoryGemmaRMSNorm(torch.nn.LayerNorm):
     def __init__(
         self,
         normalized_shape,
@@ -280,7 +280,7 @@ class EfficientMemoryRMSNormGemma(torch.nn.LayerNorm):
         sub_outlier_quantize_method: str = 'per-tensor',
         rank: int = 16,
     ):
-        super(EfficientMemoryRMSNormGemma, self).__init__(
+        super(EfficientMemoryGemmaRMSNorm, self).__init__(
             normalized_shape, eps, elementwise_affine, bias
         )
         self.outliner_ratio = outliner_ratio
@@ -292,7 +292,7 @@ class EfficientMemoryRMSNormGemma(torch.nn.LayerNorm):
         self.static_value = [None, None, None]
 
     def forward(self, x):
-        result, outliner, max_norm_column_list, scale = EfficientMemoryRMSNormGemmaFunc.apply(
+        result, outliner, max_norm_column_list, scale = EfficientMemoryGemmaRMSNormFunc.apply(
             x,
             self.normalized_shape,
             self.outliner_ratio,
