@@ -116,11 +116,7 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     x_outliner = x * mask_1
     x = x - x_outliner
     # compress the x_outlier
-    if scale == 1.:
-        x_outlier_compressed = x_outliner
-    else:
-        x_outlier_compressed = x_outliner.to_sparse() # coo
-    del x_outliner
+    x_outlier_compressed = x_outliner.to_sparse() # coo
     
     # step 2: prune the suboutliner
     if sub_outliner_ratio == 0.:
