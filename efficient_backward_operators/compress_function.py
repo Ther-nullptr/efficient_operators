@@ -120,7 +120,7 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     x_outliner = x * mask_1
     x = x - x_outliner
     # compress the x_outlier
-    if scale != 1.:
+    if torch.sum(scale) != 1.:
         x_outlier_compressed = x_outliner.to_sparse() # coo
     else:
         x_outlier_compressed = x_outliner
@@ -171,7 +171,7 @@ def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub
     x = x + x_outlier
    
     # step 3: decompress the sub_outliners
-    if scale != 1.:
+    if torch.sum(scale) != 1.:
         if sub_outliner_bit == 16:
             x_sub_outliner = x_sub_outliner_compressed
         elif sub_outliner_bit == 8:
@@ -241,13 +241,13 @@ def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_o
         x_sub_outliner = x[0]
         if sub_outlier_quantize_method == 'per-tensor':
             # TODO: set the scale factor to per channel or per tensor?
-            scale = (x_sub_outliner.max() - x_sub_outliner.min()) / (2 ** sub_outliner_bit)
+            scale = (x_sub_outliner.max() - x_sub_outliner.min()) / (2 ** sub_outliner_bit - 1)
         elif sub_outlier_quantize_method == 'per-channel':
             # channel dimension: -2
-            scale = (x_sub_outliner.max(dim=-2, keepdim=True).values - x_sub_outliner.min(dim=-2, keepdim=True).values) / (2 ** sub_outliner_bit)
+            scale = (x_sub_outliner.max(dim=-2, keepdim=True).values - x_sub_outliner.min(dim=-2, keepdim=True).values) / (2 ** sub_outliner_bit - 1)
         elif sub_outlier_quantize_method == 'per-token':
             # token dimension: -1
-            scale = (x_sub_outliner.max(dim=-1, keepdim=True).values - x_sub_outliner.min(dim=-1, keepdim=True).values) / (2 ** sub_outliner_bit)
+            scale = (x_sub_outliner.max(dim=-1, keepdim=True).values - x_sub_outliner.min(dim=-1, keepdim=True).values) / (2 ** sub_outliner_bit - 1)
         else:
             raise "Unsupport Quantize Method"
     else:
