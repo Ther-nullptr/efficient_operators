@@ -117,13 +117,12 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     x = x - x_outliner
     # compress the x_outlier
     x_outlier_compressed = x_outliner.to_sparse() # coo
-    del x_outliner
     
     # step 2: prune the suboutliner
     if sub_outliner_ratio == 0.:
-        x_sub_outliner = 0.
-        x_sub_outliner_compressed = 0.
-        scale = 1.
+        x_sub_outliner = torch.tensor(0.).cuda()
+        x_sub_outliner_compressed = torch.tensor(0.).cuda()
+        scale = torch.tensor(1.).cuda()
     else:
         x_sub_outliner = x
         assert (sub_outliner_bit in [2, 4, 8, 16]), "Only support 1,2,4,8,16 bit quantization"
@@ -155,30 +154,36 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
 
 def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, sub_outliner_bit, scale, is_head = False, num_heads = 1):
     # step 1: decompress the outliers
-    x_outlier = x_outlier_compressed.to_dense()
-   
-    # step 2: decompress the sub_outliners
-    if sub_outliner_bit == 16:
-        x_sub_outliner = x_sub_outliner_compressed
-    elif sub_outliner_bit == 8:
-        # just return to the original value
-        x_sub_outliner = x_sub_outliner_compressed.to(x_outlier.dtype) * scale
-    elif sub_outliner_bit == 4:
-        x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 4)
-        x_sub_outliner_2nd = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 4)
-        x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd), dim=-1)
-        del x_sub_outliner_1st, x_sub_outliner_2nd
-        x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 8) * scale
-    elif sub_outliner_bit == 2:
-        x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 2)
-        x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 2)
-        x_sub_outliner_2nd = x_sub_outliner_compressed % (2 ** 2)
-        x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_2nd) // (2 ** 2)
-        x_sub_outliner_3rd = x_sub_outliner_compressed % (2 ** 2)
-        x_sub_outliner_4th = (x_sub_outliner_compressed - x_sub_outliner_3rd) // (2 ** 2)
-        x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th), dim=-1)
-        del x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th
-        x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 2) * scale
+    if scale != 1.: # no need to decompress the outliers
+        x_outlier = x_outlier_compressed.to_dense()
+    else:
+        x_outlier = x_outlier_compressed
+    
+    if scale == 1.: # no need to decompress the sub_outliners
+        x_sub_outliner = 0
+    else:
+        # step 2: decompress the sub_outliners
+        if sub_outliner_bit == 16:
+            x_sub_outliner = x_sub_outliner_compressed
+        elif sub_outliner_bit == 8:
+            # just return to the original value
+            x_sub_outliner = x_sub_outliner_compressed.to(x_outlier.dtype) * scale
+        elif sub_outliner_bit == 4:
+            x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 4)
+            x_sub_outliner_2nd = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 4)
+            x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd), dim=-1)
+            del x_sub_outliner_1st, x_sub_outliner_2nd
+            x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 8) * scale
+        elif sub_outliner_bit == 2:
+            x_sub_outliner_1st = x_sub_outliner_compressed % (2 ** 2)
+            x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_1st) // (2 ** 2)
+            x_sub_outliner_2nd = x_sub_outliner_compressed % (2 ** 2)
+            x_sub_outliner_compressed = (x_sub_outliner_compressed - x_sub_outliner_2nd) // (2 ** 2)
+            x_sub_outliner_3rd = x_sub_outliner_compressed % (2 ** 2)
+            x_sub_outliner_4th = (x_sub_outliner_compressed - x_sub_outliner_3rd) // (2 ** 2)
+            x_sub_outliner = torch.cat((x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th), dim=-1)
+            del x_sub_outliner_1st, x_sub_outliner_2nd, x_sub_outliner_3rd, x_sub_outliner_4th
+            x_sub_outliner = ((x_sub_outliner).to(x_outlier.dtype) - 2) * scale
         
     x = x_outlier + x_sub_outliner
 
@@ -233,7 +238,7 @@ def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_o
         else:
             raise "Unsupport Quantize Method"
     else:
-        scale = 0
+        scale = 1.
     return outliner, max_norm_column_list, scale
 
 
