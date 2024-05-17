@@ -224,7 +224,7 @@ def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_o
         batch, num_head, seq_len, sep_dim = x.shape
         x = x.permute(0, 2, 1, 3).reshape(batch, seq_len, num_head * sep_dim)
 
-    U, S, Vh = torch.linalg.svd(x[0], full_matrices=False)
+    U, S, Vh = torch.linalg.svd(x[0].to(torch.float32), full_matrices=False)
     L = U[..., 0:svd_rank]
     R = torch.diag(S)[..., 0:svd_rank, :] @ Vh
 

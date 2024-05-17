@@ -3,7 +3,8 @@ from flash_attn.flash_attn_interface import _flash_attn_varlen_forward, _flash_a
 from .compress_function import (
     true_divide_outliner_suboutlinear_svd_compress,
     true_divide_outliner_suboutlinear_svd_decompress,
-    get_statistics
+    get_statistics,
+    pad_cut_L
 )
 
 class EfficientFlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
@@ -25,12 +26,14 @@ class EfficientFlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         sub_outliner_ratio,
         sub_outliner_bit,
         sub_outlier_quantize_method,
+        rank,
         iteration,
         q_static_value,
         k_static_value,
         v_static_value,
         o_static_value
     ):
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         
         # qkv: [B, L, 3, NH, HD]
         num_heads = qkv.shape[-2]
@@ -54,20 +57,20 @@ class EfficientFlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         )
         
         if iteration < 10:
-            q_outliner, _, scale_q = get_statistics(q, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
-            k_outliner, _, scale_k = get_statistics(k, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
-            v_outliner, _, scale_v = get_statistics(v, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
-            o_outliner, _, scale_o = get_statistics(out_padded, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method)
+            q_outliner, q_L, q_R, q_scale = get_statistics(q, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method, rank)
+            k_outliner, k_L, k_R, k_scale = get_statistics(k, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method, rank)
+            v_outliner, v_L, v_R, v_scale = get_statistics(v, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method, rank)
+            o_outliner, o_L, o_R, o_scale = get_statistics(out_padded, iteration, outliner_ratio, sub_outliner_ratio, sub_outliner_bit, sub_outlier_quantize_method, rank)
         else:
-            q_outliner, _, scale_q = q_static_value
-            k_outliner, _, scale_k = k_static_value
-            v_outliner, _, scale_v = v_static_value
-            o_outliner, _, scale_o = o_static_value
+            q_outliner, q_L, q_R, q_scale = q_static_value
+            k_outliner, k_L, k_R, k_scale = k_static_value
+            v_outliner, v_L, v_R, v_scale = v_static_value
+            o_outliner, o_L, o_R, o_scale = o_static_value
         
-        q_outliner_compressed, q_sub_outliner_compressed, q_scale = true_divide_outliner_suboutlinear_svd_compress(q, q_outliner, q_scale, sub_outliner_bit, sub_outliner_ratio)
-        k_outliner_compressed, k_sub_outliner_compressed, k_scale = true_divide_outliner_suboutlinear_svd_compress(k, k_outliner, k_scale, sub_outliner_bit, sub_outliner_ratio)
-        v_outliner_compressed, v_sub_outliner_compressed, v_scale = true_divide_outliner_suboutlinear_svd_compress(v, v_outliner, v_scale, sub_outliner_bit, sub_outliner_ratio)
-        o_outliner_compressed, o_sub_outliner_compressed, o_scale = true_divide_outliner_suboutlinear_svd_compress(out, o_outliner, o_scale, sub_outliner_bit, sub_outliner_ratio)
+        q_outliner_compressed, q_sub_outliner_compressed, q_scale = true_divide_outliner_suboutlinear_svd_compress(q, q_outliner, q_scale, sub_outliner_bit, sub_outliner_ratio, L=q_L, R=q_R)
+        k_outliner_compressed, k_sub_outliner_compressed, k_scale = true_divide_outliner_suboutlinear_svd_compress(k, k_outliner, k_scale, sub_outliner_bit, sub_outliner_ratio, L=k_L, R=k_R)
+        v_outliner_compressed, v_sub_outliner_compressed, v_scale = true_divide_outliner_suboutlinear_svd_compress(v, v_outliner, v_scale, sub_outliner_bit, sub_outliner_ratio, L=v_L, R=v_R)
+        o_outliner_compressed, o_sub_outliner_compressed, o_scale = true_divide_outliner_suboutlinear_svd_compress(out, o_outliner, o_scale, sub_outliner_bit, sub_outliner_ratio, L=o_L, R=o_R)
         
         ctx.dropout_p = dropout_p
         ctx.max_seqlen = max_seqlen
@@ -78,18 +81,18 @@ class EfficientFlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sub_outliner_bit = sub_outliner_bit
         
-        ctx.mark_non_differentiable(q_outliner, k_outliner, v_outliner, o_outliner)
+        ctx.mark_non_differentiable(q_outliner, k_outliner, v_outliner, o_outliner, q_L, q_R, k_L, k_R, v_L, v_R, o_L, o_R, q_scale, k_scale, v_scale, o_scale)
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens, rng_state)
-        ctx.save_for_backward(q_outliner_compressed, q_sub_outliner_compressed, q_scale, k_outliner_compressed, k_sub_outliner_compressed, k_scale, v_outliner_compressed, v_sub_outliner_compressed, v_scale, o_outliner_compressed, o_sub_outliner_compressed, o_scale, softmax_lse, cu_seqlens, rng_state)
-        return out, q_outliner, k_outliner, v_outliner, o_outliner, q_scale, k_scale, v_scale, o_scale
+        ctx.save_for_backward(q_outliner_compressed, q_sub_outliner_compressed, q_scale, k_outliner_compressed, k_sub_outliner_compressed, k_scale, v_outliner_compressed, v_sub_outliner_compressed, v_scale, o_outliner_compressed, o_sub_outliner_compressed, o_scale, q_L, q_R, k_L, k_R, v_L, v_R, o_L, o_R, softmax_lse, cu_seqlens, rng_state)
+        return out, q_outliner, k_outliner, v_outliner, o_outliner, q_scale, k_scale, v_scale, o_scale, q_L, q_R, k_L, k_R, v_L, v_R, o_L, o_R
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q_outliner_compressed, q_sub_outliner_compressed, q_scale, k_outliner_compressed, k_sub_outliner_compressed, k_scale, v_outliner_compressed, v_sub_outliner_compressed, v_scale, o_outliner_compressed, o_sub_outliner_compressed, o_scale, softmax_lse, cu_seqlens, rng_state = ctx.saved_tensors
-        q = true_divide_outliner_suboutlinear_svd_decompress(q_outliner_compressed, q_sub_outliner_compressed, ctx.sub_outliner_bit, q_scale, True, ctx.num_heads)
-        k = true_divide_outliner_suboutlinear_svd_decompress(k_outliner_compressed, k_sub_outliner_compressed, ctx.sub_outliner_bit, k_scale, True, ctx.num_heads)
-        v = true_divide_outliner_suboutlinear_svd_decompress(v_outliner_compressed, v_sub_outliner_compressed, ctx.sub_outliner_bit, v_scale, True, ctx.num_heads)
-        out = true_divide_outliner_suboutlinear_svd_decompress(o_outliner_compressed, o_sub_outliner_compressed, ctx.sub_outliner_bit, o_scale, True, ctx.num_heads)
+        q_outliner_compressed, q_sub_outliner_compressed, q_scale, k_outliner_compressed, k_sub_outliner_compressed, k_scale, v_outliner_compressed, v_sub_outliner_compressed, v_scale, o_outliner_compressed, o_sub_outliner_compressed, o_scale, q_L, q_R, k_L, k_R, v_L, v_R, o_L, o_R, softmax_lse, cu_seqlens, rng_state = ctx.saved_tensors
+        q = true_divide_outliner_suboutlinear_svd_decompress(q_outliner_compressed, q_sub_outliner_compressed, ctx.sub_outliner_bit, q_scale, True, ctx.num_heads, L=q_L, R=q_R)
+        k = true_divide_outliner_suboutlinear_svd_decompress(k_outliner_compressed, k_sub_outliner_compressed, ctx.sub_outliner_bit, k_scale, True, ctx.num_heads, L=k_L, R=k_R)
+        v = true_divide_outliner_suboutlinear_svd_decompress(v_outliner_compressed, v_sub_outliner_compressed, ctx.sub_outliner_bit, v_scale, True, ctx.num_heads, L=v_L, R=v_R)
+        out = true_divide_outliner_suboutlinear_svd_decompress(o_outliner_compressed, o_sub_outliner_compressed, ctx.sub_outliner_bit, o_scale, True, ctx.num_heads, L=o_L, R=o_R)
         
         qkv_shape = q.shape[:-2] + (3, *q.shape[-2:])
         dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
@@ -116,7 +119,7 @@ class EfficientFlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             rng_state=rng_state,
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
-        return dqkv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dqkv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
     
     
 class EfficientFlashAttnVarlenQKVPacked(torch.nn.Module):
@@ -136,10 +139,10 @@ class EfficientFlashAttnVarlenQKVPacked(torch.nn.Module):
         self.rank = rank
         self.iteration = 0
         
-        self.q_static_value = [None, None, None]
-        self.k_static_value = [None, None, None]
-        self.v_static_value = [None, None, None]
-        self.o_static_value = [None, None, None]
+        self.q_static_value = [None, None, None, None]
+        self.k_static_value = [None, None, None, None]
+        self.v_static_value = [None, None, None, None]
+        self.o_static_value = [None, None, None, None]
         
     def forward(
         self,
@@ -154,7 +157,7 @@ class EfficientFlashAttnVarlenQKVPacked(torch.nn.Module):
         deterministic=False,
         return_attn_probs=False,
     ):
-        out, q_outliner, k_outliner, v_outliner, o_outliner, q_scale, k_scale, v_scale, o_scale = EfficientFlashAttnVarlenQKVPackedFunc.apply(
+        out, q_outliner, k_outliner, v_outliner, o_outliner, q_scale, k_scale, v_scale, o_scale, q_L, q_R, k_L, k_R, v_L, v_R, o_L, o_R = EfficientFlashAttnVarlenQKVPackedFunc.apply(
             qkv,
             cu_seqlens,
             max_seqlen,
@@ -170,13 +173,16 @@ class EfficientFlashAttnVarlenQKVPacked(torch.nn.Module):
             self.sub_outliner_ratio,
             self.sub_outliner_bit,
             self.sub_outlier_quantize_method,
+            self.rank,
             self.iteration,
             self.q_static_value,
             self.k_static_value,
             self.v_static_value,
             self.o_static_value
         )
+        
         if self.iteration <= 10:
+            # outlier
             self.q_static_value[0] = (
                 q_outliner
                 if self.q_static_value[0] is None
@@ -202,6 +208,7 @@ class EfficientFlashAttnVarlenQKVPacked(torch.nn.Module):
                 / (self.iteration + 1)
             )
             
+            # scale
             self.q_static_value[2] = (
                 q_scale
                 if self.q_static_value[2] is None
@@ -226,7 +233,58 @@ class EfficientFlashAttnVarlenQKVPacked(torch.nn.Module):
                 else (self.iteration * self.o_static_value[2] + o_scale)
                 / (self.iteration + 1)
             )
-        
+            
+            # L
+            self.q_static_value[1] = (
+                q_L
+                if self.q_static_value[1] is None
+                else (self.iteration * self.q_static_value[1] + pad_cut_L(q_L, self.q_static_value[1]))
+                / (self.iteration + 1)
+            )
+            self.k_static_value[1] = (
+                k_L
+                if self.k_static_value[1] is None
+                else (self.iteration * self.k_static_value[1] + pad_cut_L(k_L, self.k_static_value[1]))
+                / (self.iteration + 1)
+            )
+            self.v_static_value[1] = (
+                v_L
+                if self.v_static_value[1] is None
+                else (self.iteration * self.v_static_value[1] + pad_cut_L(v_L, self.v_static_value[1]))
+                / (self.iteration + 1)
+            )
+            self.o_static_value[1] = (
+                o_L
+                if self.o_static_value[1] is None
+                else (self.iteration * self.o_static_value[1] + pad_cut_L(o_L, self.o_static_value[1]))
+                / (self.iteration + 1)
+            )
+            
+            # R
+            self.q_static_value[3] = (
+                q_R
+                if self.q_static_value[3] is None
+                else (self.iteration * self.q_static_value[3] + q_R)
+                / (self.iteration + 1)
+            )
+            self.k_static_value[3] = (
+                k_R
+                if self.k_static_value[3] is None
+                else (self.iteration * self.k_static_value[3] + k_R)
+                / (self.iteration + 1)
+            )
+            self.v_static_value[3] = (
+                v_R
+                if self.v_static_value[3] is None
+                else (self.iteration * self.v_static_value[3] + v_R)
+                / (self.iteration + 1)
+            )
+            self.o_static_value[3] = (
+                o_R
+                if self.o_static_value[3] is None
+                else (self.iteration * self.o_static_value[3] + o_R)
+                / (self.iteration + 1)
+            )
         self.iteration += 1
         
         return out
