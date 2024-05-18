@@ -116,7 +116,10 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
     x_outliner = x * mask_1
     x = x - x_outliner
     # compress the x_outlier
-    x_outlier_compressed = x_outliner.to_sparse() # coo
+    if torch.sum(scale) != 1.:
+        x_outlier_compressed = x_outliner.to_sparse() # coo
+    else:
+        x_outlier_compressed = x_outliner
     
     # step 2: prune the suboutliner
     if sub_outliner_ratio == 0.:
@@ -154,12 +157,12 @@ def true_divide_outliner_suboutlinear_svd_compress(x: torch.Tensor, outliner: fl
 
 def true_divide_outliner_suboutlinear_svd_decompress(x_outlier_compressed, x_sub_outliner_compressed, sub_outliner_bit, scale, is_head = False, num_heads = 1):
     # step 1: decompress the outliers
-    if scale != 1.: # no need to decompress the outliers
+    if torch.sum(scale) != 1.: # no need to decompress the outliers
         x_outlier = x_outlier_compressed.to_dense()
     else:
         x_outlier = x_outlier_compressed
     
-    if scale == 1.: # no need to decompress the sub_outliners
+    if torch.sum(scale) == 1.: # no need to decompress the sub_outliners
         x_sub_outliner = 0
     else:
         # step 2: decompress the sub_outliners
@@ -202,7 +205,7 @@ def prune_softmax(x: torch.Tensor, outliner: float):
 def true_compress_softmax(x: torch.Tensor, outliner: float):
     mask = (x > outliner)
     x_outliner = x * mask
-    x_outliner_sparse = x_outliner.to_sparse()
+    x_outliner_sparse = x_outliner # .to_sparse()
     return x_outliner_sparse
 
 
@@ -238,7 +241,7 @@ def get_statistics(x: torch.Tensor, iteration: int, outliner_ratio: float, sub_o
         else:
             raise "Unsupport Quantize Method"
     else:
-        scale = 1.
+        scale = torch.tensor(1.).cuda()
     return outliner, max_norm_column_list, scale
 
 
